@@ -23,11 +23,11 @@ To install and use the `tools` script globally, follow the steps below:
 3. **Add the script to your PATH based on which shell you use**:
    - Bash (`~/.bashrc`): 
      ```bash
-     echo 'export PATH="$HOME/scripts:$PATH"' >> ~/.bashrc
+     echo 'export PATH="$HOME/<YOUR_PATH_TO_DEV_TOOLS_REPO_CLONE>:$PATH"' >> ~/.bashrc
    - Z Shell (`~/.zshrc`):
      ```bash
-     echo 'export PATH="$HOME/scripts:$PATH"' >> ~/.zshrc
+     echo 'export PATH="$HOME/<YOUR_PATH_TO_DEV_TOOLS_REPO_CLONE>:$PATH"' >> ~/.zshrc
    - Fish Shell (`~/.config/fish/config.fish`):
      ```bash
-     echo 'export PATH="$HOME/scripts:$PATH"' >> ~/.zshrc 
+     echo 'export PATH="$HOME/<YOUR_PATH_TO_DEV_TOOLS_REPO_CLONE>:$PATH"' >> ~/.config/fish/config.fish
    
