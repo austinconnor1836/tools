@@ -1,6 +1,10 @@
 # dev-tools
 
-A collection of useful Git utilities, including commands to create a copy of the current branch and delete all local branches except specified ones.
+A collection of useful utilities for software developers.
+It includes commands for:
+- git:
+  - Create a copy of a git branch
+  - Delete all branches except for those specified as arguments
 
 ## Getting Started
 
