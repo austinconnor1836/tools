@@ -30,4 +30,7 @@ To install and use the `tools` script globally, follow the steps below:
    - Fish Shell (`~/.config/fish/config.fish`):
      ```bash
      echo 'export PATH="$HOME/<YOUR_PATH_TO_DEV_TOOLS_REPO_CLONE>:$PATH"' >> ~/.config/fish/config.fish
-   
+
+## Get Captions of Youtube Video
+1. Download cookies
+2. With timestamps: `yt-dlp --write-subs --sub-lang en --skip-download --cookies cookies.txt https://youtu.be/MN_rlPb6LRA?si=AghZoqZQF-g8AKYO`
