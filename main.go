@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/url"
@@ -26,11 +27,15 @@ func main() {
 		}
 		DeleteAllBranches(os.Args[2:])
 	case "get-text-from-video":
-		if len(os.Args) < 3 {
+		getTextFromVideoCommand := flag.NewFlagSet("get-text-from-video", flag.ExitOnError)
+		downloadMP4Flag := getTextFromVideoCommand.Bool("download-mp4", false, "Download the video as MP4")
+		getTextFromVideoCommand.Parse(os.Args[2:])
+
+		if getTextFromVideoCommand.NArg() < 1 {
 			fmt.Println("Please provide a video URL.")
 			return
 		}
-		videoURL := os.Args[2]
+		videoURL := getTextFromVideoCommand.Arg(0)
 		u, err := url.Parse(videoURL)
 		if err != nil {
 			log.Fatalf("Error parsing video URL: %v", err)
@@ -42,12 +47,17 @@ func main() {
 			videoID = parts[len(parts)-1]
 		}
 
-		// GetVideoTranscript(videoID)
-		// Step 1: Download the video and extract audio
-		if err := DownloadVideo(videoURL); err != nil {
-			log.Fatalf("Error downloading video: %v", err)
+		if *downloadMP4Flag {
+			// Step 1: Download the video as MP4
+			if err := DownloadVideoAsMP4(videoURL); err != nil {
+				log.Fatalf("Error downloading video: %v", err)
+			}
+		} else {
+			// Step 1: Download the audio and extract audio
+			if err := DownloadVideo(videoURL); err != nil {
+				log.Fatalf("Error downloading video: %v", err)
+			}
 		}
-
 		// Step 2: Transcribe the audio to get the text
 		text, err := TranscribeAudio("audio.wav")
 		if err != nil {
@@ -56,6 +66,11 @@ func main() {
 
 		if err := SaveTranscriptionToFile(videoID, text); err != nil {
 			log.Fatalf("Error saving transcription to file: %v", err)
+		}
+
+		// Clean up temporary audio and video files
+		if err := CleanUpFiles("audio.wav", "audio.m4a"); err != nil {
+			log.Printf("Error cleaning up files: %v", err)
 		}
 
 	default:

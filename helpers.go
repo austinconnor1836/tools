@@ -31,6 +31,19 @@ func DeleteAllBranches(branchesToKeep []string) {
 	fmt.Printf("Simulating deleting all branches except: %s\n", strings.Join(branchesToKeep, ", "))
 }
 
+// CleanUpFiles removes the specified files from the filesystem
+func CleanUpFiles(files ...string) error {
+	for _, file := range files {
+		if _, err := os.Stat(file); err == nil {
+			if err := os.Remove(file); err != nil {
+				return fmt.Errorf("failed to delete %s: %v", file, err)
+			}
+			fmt.Printf("Deleted %s\n", file)
+		}
+	}
+	return nil
+}
+
 func tokenFromFile(path string) (*oauth2.Token, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -128,6 +141,19 @@ func DownloadVideo(videoURL string) error {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("error converting audio: %v", err)
+	}
+
+	return nil
+}
+
+// DownloadVideoAsMP4 uses yt-dlp to download the video as an MP4 file
+func DownloadVideoAsMP4(videoURL string) error {
+	// Download the best available MP4 format
+	cmd := exec.Command("yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4", "-o", "video.mp4", videoURL)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("error downloading video: %v", err)
 	}
 
 	return nil
