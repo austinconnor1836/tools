@@ -3,21 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-	"google.golang.org/api/youtube/v3"
 )
 
 func ShowHelp() {
@@ -47,80 +40,6 @@ func CleanUpFiles(files ...string) error {
 		}
 	}
 	return nil
-}
-
-func tokenFromFile(path string) (*oauth2.Token, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	token := &oauth2.Token{}
-	return token, json.NewDecoder(file).Decode(token)
-}
-
-func getOAuthConfig() *oauth2.Config {
-	credentialsFile := "./credentials.json"
-	b, err := os.ReadFile(credentialsFile)
-	if err != nil {
-		log.Fatalf("Unable to read client secret file: %v", err)
-	}
-
-	config, err := google.ConfigFromJSON(b, youtube.YoutubeForceSslScope)
-
-	if err != nil {
-		log.Fatalf("Unable to parse client secret file to config: %v", err)
-	}
-	config.RedirectURL = "http://localhost:8081/callback"
-	return config
-}
-
-func getClient(config *oauth2.Config) *http.Client {
-	authCodeCh := make(chan string)
-
-	// Start the callback server in a goroutine
-	go func() {
-		http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-			code := r.URL.Query().Get("code")
-			if code == "" {
-				fmt.Fprintln(w, "No code in URL")
-				return
-			}
-			fmt.Fprintln(w, "Authorization successful! You can close this window.")
-			authCodeCh <- code
-		})
-
-		if err := http.ListenAndServe(":8081", nil); err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
-		}
-	}()
-
-	// Generate the authorization URL
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser, then authorize the application:\n%v\n", authURL)
-
-	// Wait for the authorization code from the callback
-	authCode := <-authCodeCh
-
-	// Exchange the authorization code for a token
-	token, err := config.Exchange(context.TODO(), authCode)
-	if err != nil {
-		log.Fatalf("Unable to retrieve token from web: %v", err)
-	}
-	saveToken("token.json", token)
-
-	return config.Client(context.Background(), token)
-}
-
-func saveToken(path string, token *oauth2.Token) {
-	file, err := os.Create(path)
-	if err != nil {
-		log.Fatalf("Unable to save token: %v", err)
-	}
-	defer file.Close()
-	if err := json.NewEncoder(file).Encode(token); err != nil {
-		log.Fatalf("Unable to encode token: %v", err)
-	}
 }
 
 // EnsureOutputDir ensures the output directory exists
@@ -282,6 +201,14 @@ func ConvertToSpeech(inputFile string) error {
 
 	// Determine the final output file name based on the input file
 	outputFile := fmt.Sprintf("%s/%s.mp3", outputDir, strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile)))
+
+	// Remove the output file if it already exists
+	if _, err := os.Stat(outputFile); err == nil {
+		fmt.Printf("File %s already exists. Overwriting...\n", outputFile)
+		if err := os.Remove(outputFile); err != nil {
+			return fmt.Errorf("failed to delete existing output file: %v", err)
+		}
+	}
 
 	// Combine all the temporary MP3 files into a single output file
 	if err := combineMP3Files(tempFiles, outputFile); err != nil {
