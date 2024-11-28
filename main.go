@@ -59,7 +59,7 @@ func main() {
 			}
 		}
 		// Step 2: Transcribe the audio to get the text
-		text, err := TranscribeAudio("audio.wav")
+		text, err := TranscribeAudio("./output/audio.wav")
 		if err != nil {
 			log.Fatalf("Error transcribing audio: %v", err)
 		}
@@ -69,10 +69,46 @@ func main() {
 		}
 
 		// Clean up temporary audio and video files
-		if err := CleanUpFiles("audio.wav", "audio.m4a"); err != nil {
+		if err := CleanUpFiles("./output/audio.wav", "./output/audio.m4a"); err != nil {
 			log.Printf("Error cleaning up files: %v", err)
 		}
+	case "download-video":
+		downloadVideoCommand := flag.NewFlagSet("download-video", flag.ExitOnError)
+		downloadVideoCommand.Parse(os.Args[2:])
 
+		if downloadVideoCommand.NArg() < 1 {
+			fmt.Println("Please provide a video URL.")
+			return
+		}
+		videoURL := downloadVideoCommand.Arg(0)
+		_, err := url.Parse(videoURL)
+		if err != nil {
+			log.Fatalf("Error parsing video URL: %v", err)
+		}
+
+		if err := DownloadVideoAsMP4(videoURL); err != nil {
+			log.Fatalf("Error downloading video: %v", err)
+		}
+
+		// Clean up temporary audio and video files
+		if err := CleanUpFiles("./output/audio.wav", "./output/audio.m4a"); err != nil {
+			log.Printf("Error cleaning up files: %v", err)
+		}
+	case "convert-to-speech":
+		convertToSpeechCommand := flag.NewFlagSet("convert-to-speech", flag.ExitOnError)
+		convertToSpeechCommand.Parse(os.Args[2:])
+
+		if convertToSpeechCommand.NArg() < 1 {
+			fmt.Println("Please provide a text file path.")
+			return
+		}
+		textFilePath := convertToSpeechCommand.Arg(0)
+
+		// Process the file and convert it to speech
+		err := ConvertToSpeech(textFilePath)
+		if err != nil {
+			log.Fatalf("Error converting text to speech: %v", err)
+		}
 	default:
 		ShowHelp()
 	}
