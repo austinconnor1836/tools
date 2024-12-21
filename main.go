@@ -72,7 +72,7 @@ func main() {
 		if err := CleanUpFiles("./output/audio.wav", "./output/audio.m4a"); err != nil {
 			log.Printf("Error cleaning up files: %v", err)
 		}
-	case "download-video":
+	case "download":
 		downloadVideoCommand := flag.NewFlagSet("download-video", flag.ExitOnError)
 		downloadVideoCommand.Parse(os.Args[2:])
 
@@ -109,6 +109,35 @@ func main() {
 		if err != nil {
 			log.Fatalf("Error converting text to speech: %v", err)
 		}
+	case "split-video":
+		splitCmd := flag.NewFlagSet("split-video", flag.ExitOnError)
+		thresholdFlag := splitCmd.Float64("threshold", -40, "Silence detection threshold in dB (e.g., -40)")
+		durationFlag := splitCmd.Float64("duration", 2.0, "Minimum silence duration in seconds")
+
+		// Check if there are enough arguments before parsing
+		if len(os.Args) < 3 {
+			log.Fatalf("Usage: split-video [-threshold=<value>] [-duration=<value>] <video-file>")
+		}
+
+		// Parse the flags for this command
+		if err := splitCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing flags for split-video: %v", err)
+		}
+
+		// Validate arguments
+		if splitCmd.NArg() < 1 {
+			log.Fatalf("Usage: split-video [-threshold=<value>] [-duration=<value>] <video-file>")
+		}
+
+		videoFile := splitCmd.Arg(0)
+		log.Printf("Splitting video: %s with threshold=%f dB and duration=%f seconds", videoFile, *thresholdFlag, *durationFlag)
+
+		// Call the SplitVideo function
+		err := SplitVideo(videoFile, *thresholdFlag, *durationFlag)
+		if err != nil {
+			log.Fatalf("Error splitting video: %v", err)
+		}
+
 	default:
 		ShowHelp()
 	}
