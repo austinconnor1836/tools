@@ -454,81 +454,6 @@ func ParseSilenceOutputToTalkingIntervals(output string, videoDuration float64) 
 	return intervals, nil
 }
 
-// func SplitVideo(videoFile string, threshold float64, duration float64) error {
-// 	outputDir := fmt.Sprintf("output/%s", strings.TrimSuffix(filepath.Base(videoFile), filepath.Ext(videoFile)))
-// 	os.MkdirAll(outputDir, os.ModePerm)
-
-// 	cmd := exec.Command("ffmpeg",
-// 		"-i", videoFile,
-// 		"-af", fmt.Sprintf("silencedetect=n=%fdB:d=%f", threshold, duration),
-// 		"-f", "null", "-",
-// 	)
-// 	cmdOutput, err := cmd.CombinedOutput()
-// 	if err != nil {
-// 		log.Printf("Error running FFmpeg silencedetect: %v", err)
-// 		log.Printf("FFmpeg output:\n%s", string(cmdOutput))
-// 		return fmt.Errorf("error detecting silence: %v", err)
-// 	}
-
-// 	intervals, err := ParseSilenceOutputToTalkingIntervals(string(cmdOutput), duration)
-// 	if err != nil {
-// 		log.Printf("Error parsing silence output: %v", err)
-// 		return fmt.Errorf("error parsing silence output: %v", err)
-// 	}
-// 	log.Printf("Detected %d raw talking intervals", len(intervals))
-
-// 	var validIntervals []SilenceInterval
-// 	for _, interval := range intervals {
-// 		startMs := int(interval.Start * 1000)
-// 		endMs := int(interval.End * 1000)
-// 		durationMs := endMs - startMs
-
-// 		if durationMs > minClipDurationMs && interval.Start < interval.End {
-// 			validIntervals = append(validIntervals, interval)
-// 		} else {
-// 			log.Printf("[SKIP] Interval too short or zero-length: Start=%.2f, End=%.2f, Duration=%dms",
-// 				interval.Start, interval.End, durationMs)
-// 		}
-// 	}
-// 	log.Printf("Filtered to %d valid intervals", len(validIntervals))
-
-// 	for i, interval := range validIntervals {
-// 		start := interval.Start
-// 		end := interval.End
-
-// 		if start == end {
-// 			log.Printf("[SKIP] Interval with identical start and end: Start=%.2f, End=%.2f", start, end)
-// 			continue
-// 		}
-
-// 		outputClip := fmt.Sprintf("%s/clip_%d.mp4", outputDir, i+1)
-
-// 		log.Printf("Creating clip %d: Start=%.2f, End=%.2f", i+1, start, end)
-// 		splitCmd := exec.Command("ffmpeg",
-// 			"-y",
-// 			"-i", videoFile,
-// 			"-ss", fmt.Sprintf("%.2f", start),
-// 			"-to", fmt.Sprintf("%.2f", end),
-// 			"-c:v", "libx264", // Re-encode with H.264
-// 			"-preset", "fast",
-// 			"-crf", "18",
-// 			"-force_key_frames", fmt.Sprintf("expr:gte(t,%.2f)", start), // Force keyframe at start
-// 			outputClip,
-// 		)
-
-// 		splitOutput, splitErr := splitCmd.CombinedOutput()
-// 		log.Printf("FFmpeg output for clip %d:\n%s", i+1, string(splitOutput))
-
-// 		if splitErr != nil {
-// 			log.Printf("Error creating clip %d (Start=%.2f, End=%.2f): %v", i+1, start, end, splitErr)
-// 			return fmt.Errorf("error creating clip %d: %v", i+1, splitErr)
-// 		}
-// 	}
-
-// 	log.Println("Splitting complete.")
-// 	return nil
-// }
-
 const minClipDurationMs = 50   // Minimum allowed duration for clips in milliseconds
 const startBufferSeconds = 1.5 // Buffer to adjust talking start time earlier
 const endBufferSeconds = 1.5   // Buffer to adjust talking end time later
@@ -610,5 +535,27 @@ func SplitVideo(videoFile string, threshold float64, duration float64) error {
 	}
 
 	log.Println("Splitting complete.")
+	return nil
+}
+
+// DownloadFromX downloads a video from an X.com (Twitter) post
+func DownloadFromX(postURL string) error {
+	// Ensure the "output" directory exists
+	EnsureOutputDir("output")
+
+	// Generate a unique filename for the output video
+	outputFile := fmt.Sprintf("./output/%s_x_video.mp4", uuid.New().String())
+
+	// Use yt-dlp to fetch the video from the provided X.com post URL
+	cmd := exec.Command("yt-dlp", "-f", "best", "-o", outputFile, postURL)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Printf("Downloading video from X.com: %s\n", postURL)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("error downloading video from X.com: %v", err)
+	}
+
+	fmt.Printf("Video downloaded and saved as %s\n", outputFile)
 	return nil
 }

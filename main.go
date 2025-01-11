@@ -35,29 +35,41 @@ func main() {
 			fmt.Println("Please provide a video URL.")
 			return
 		}
-		videoURL := getTextFromVideoCommand.Arg(0)
-		u, err := url.Parse(videoURL)
-		if err != nil {
-			log.Fatalf("Error parsing video URL: %v", err)
-		}
+		var videoID string
+		videoInput := getTextFromVideoCommand.Arg(0)
+		// Check if input is a local file
+		if _, err := os.Stat(videoInput); err == nil {
+			log.Printf("Detected local file: %s", videoInput)
 
-		videoID := u.Query().Get("v")
-		if videoID == "" {
-			parts := strings.Split(u.Path, "/")
-			videoID = parts[len(parts)-1]
-		}
-
-		if *downloadMP4Flag {
-			// Step 1: Download the video as MP4
-			if err := DownloadVideoAsMP4(videoURL); err != nil {
-				log.Fatalf("Error downloading video: %v", err)
+			// Extract audio from local video file directly
+			if err := ExtractAudio(videoInput, "./output/audio.wav"); err != nil {
+				log.Fatalf("Error extracting audio: %v", err)
 			}
+
 		} else {
-			// Step 1: Download the audio and extract audio
-			if err := DownloadVideo(videoURL); err != nil {
-				log.Fatalf("Error downloading video: %v", err)
+			// Assume it's a URL if the file does not exist locally
+			u, err := url.Parse(videoInput)
+			if err != nil {
+				log.Fatalf("Error parsing video URL: %v", err)
+			}
+
+			videoID := u.Query().Get("v")
+			if videoID == "" {
+				parts := strings.Split(u.Path, "/")
+				videoID = parts[len(parts)-1]
+			}
+
+			if *downloadMP4Flag {
+				if err := DownloadVideoAsMP4(videoInput); err != nil {
+					log.Fatalf("Error downloading video: %v", err)
+				}
+			} else {
+				if err := DownloadVideo(videoInput); err != nil {
+					log.Fatalf("Error downloading video: %v", err)
+				}
 			}
 		}
+
 		// Step 2: Transcribe the audio to get the text
 		text, err := TranscribeAudio("./output/audio.wav")
 		if err != nil {
@@ -73,14 +85,27 @@ func main() {
 			log.Printf("Error cleaning up files: %v", err)
 		}
 	case "download":
-		downloadVideoCommand := flag.NewFlagSet("download-video", flag.ExitOnError)
-		downloadVideoCommand.Parse(os.Args[2:])
+		downloadCommand := flag.NewFlagSet("download", flag.ExitOnError)
+		xFlag := downloadCommand.String("x", "", "Download video from X.com (Twitter) post link")
 
-		if downloadVideoCommand.NArg() < 1 {
+		if err := downloadCommand.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing download command: %v", err)
+		}
+
+		if *xFlag != "" {
+			// Download video from X.com post
+			if err := DownloadFromX(*xFlag); err != nil {
+				log.Fatalf("Error downloading from X.com: %v", err)
+			}
+			return
+		}
+
+		// Default behavior: Expect a generic video URL
+		if downloadCommand.NArg() < 1 {
 			fmt.Println("Please provide a video URL.")
 			return
 		}
-		videoURL := downloadVideoCommand.Arg(0)
+		videoURL := downloadCommand.Arg(0)
 		_, err := url.Parse(videoURL)
 		if err != nil {
 			log.Fatalf("Error parsing video URL: %v", err)
@@ -90,10 +115,11 @@ func main() {
 			log.Fatalf("Error downloading video: %v", err)
 		}
 
-		// Clean up temporary audio and video files
+		// Clean up temporary files
 		if err := CleanUpFiles("./output/audio.wav", "./output/audio.m4a"); err != nil {
 			log.Printf("Error cleaning up files: %v", err)
 		}
+
 	case "convert-to-speech":
 		convertToSpeechCommand := flag.NewFlagSet("convert-to-speech", flag.ExitOnError)
 		convertToSpeechCommand.Parse(os.Args[2:])
