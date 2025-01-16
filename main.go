@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -26,8 +27,8 @@ func main() {
 			return
 		}
 		DeleteAllBranches(os.Args[2:])
-	case "get-text-from-video":
-		getTextFromVideoCommand := flag.NewFlagSet("get-text-from-video", flag.ExitOnError)
+	case "transcribe":
+		getTextFromVideoCommand := flag.NewFlagSet("transcribe", flag.ExitOnError)
 		downloadMP4Flag := getTextFromVideoCommand.Bool("download-mp4", false, "Download the video as MP4")
 		getTextFromVideoCommand.Parse(os.Args[2:])
 
@@ -35,8 +36,9 @@ func main() {
 			fmt.Println("Please provide a video URL.")
 			return
 		}
-		var videoID string
 		videoInput := getTextFromVideoCommand.Arg(0)
+		var title string
+
 		// Check if input is a local file
 		if _, err := os.Stat(videoInput); err == nil {
 			log.Printf("Detected local file: %s", videoInput)
@@ -46,17 +48,14 @@ func main() {
 				log.Fatalf("Error extracting audio: %v", err)
 			}
 
+			// Use the file name as the title
+			title = strings.TrimSuffix(filepath.Base(videoInput), filepath.Ext(videoInput))
+
 		} else {
 			// Assume it's a URL if the file does not exist locally
-			u, err := url.Parse(videoInput)
+			title, err = GetVideoTitle(videoInput)
 			if err != nil {
-				log.Fatalf("Error parsing video URL: %v", err)
-			}
-
-			videoID := u.Query().Get("v")
-			if videoID == "" {
-				parts := strings.Split(u.Path, "/")
-				videoID = parts[len(parts)-1]
+				log.Fatalf("Error fetching video title: %v", err)
 			}
 
 			if *downloadMP4Flag {
@@ -76,7 +75,7 @@ func main() {
 			log.Fatalf("Error transcribing audio: %v", err)
 		}
 
-		if err := SaveTranscriptionToFile(videoID, text); err != nil {
+		if err := SaveTranscriptionToFile(title, text); err != nil {
 			log.Fatalf("Error saving transcription to file: %v", err)
 		}
 

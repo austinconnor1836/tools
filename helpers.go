@@ -20,7 +20,7 @@ func ShowHelp() {
 	fmt.Println("\nCommands:")
 	fmt.Println("  copy-branch                            Simulate copying current Git branch")
 	fmt.Println("  delete-all-branches branch1 branch2    Simulate deleting all local branches except specified")
-	fmt.Println("  get-text-from-video URL                Download video from URL and extract text")
+	fmt.Println("  transcribe <URL|PATH>                  Download video from URL and extract text")
 	fmt.Println("  split-video                            Split video into clips based on audio")
 }
 
@@ -30,6 +30,16 @@ func CopyBranch() {
 
 func DeleteAllBranches(branchesToKeep []string) {
 	fmt.Printf("Simulating deleting all branches except: %s\n", strings.Join(branchesToKeep, ", "))
+}
+
+// sanitizeFileName replaces invalid characters in a file name
+func sanitizeFileName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`\/:*?"<>|`, r) {
+			return '-'
+		}
+		return r
+	}, name)
 }
 
 // CleanUpFiles removes the specified files from the filesystem
@@ -129,12 +139,24 @@ func ExtractAudio(videoFile, audioFile string) error {
 	return nil
 }
 
+// GetVideoTitle fetches the title of the video using yt-dlp
+func GetVideoTitle(videoURL string) (string, error) {
+	cmd := exec.Command("yt-dlp", "--get-title", videoURL)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("error fetching video title: %v", err)
+	}
+	title := strings.TrimSpace(string(output))
+	return title, nil
+}
+
 // SaveTranscriptionToFile saves the transcription text to a .txt file
-func SaveTranscriptionToFile(videoID, transcribedText string) error {
+func SaveTranscriptionToFile(title, transcribedText string) error {
 	EnsureOutputDir("output")
 
-	filename := fmt.Sprintf("./output/%s_transcription.txt", videoID)
-	file, err := os.Create(filename)
+	// Replace any invalid characters in the title for a file name
+	fileName := fmt.Sprintf("./output/%s_transcription.txt", sanitizeFileName(title))
+	file, err := os.Create(fileName)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
 	}
@@ -145,7 +167,6 @@ func SaveTranscriptionToFile(videoID, transcribedText string) error {
 		return fmt.Errorf("failed to write transcription to file: %v", err)
 	}
 
-	fmt.Printf("Transcription saved to %s\n", filename)
 	return nil
 }
 
@@ -261,139 +282,6 @@ type SilenceInterval struct {
 	Start float64
 	End   float64
 }
-
-// ParseSilenceOutputToTalkingIntervals parses FFmpeg silence detection output and returns intervals of talking parts.
-// func ParseSilenceOutputToTalkingIntervals(output string, videoDuration float64) ([]SilenceInterval, error) {
-// 	var intervals []SilenceInterval
-// 	var silenceStarts []float64
-// 	var silenceEnds []float64
-
-// 	lines := strings.Split(output, "\n")
-// 	for _, line := range lines {
-// 		line = strings.TrimSpace(line)
-
-// 		if strings.Contains(line, "silence_start:") {
-// 			parts := strings.Split(line, "silence_start:")
-// 			if len(parts) < 2 {
-// 				continue
-// 			}
-// 			startStr := strings.Fields(parts[1])[0]
-// 			start, err := strconv.ParseFloat(startStr, 64)
-// 			if err == nil {
-// 				silenceStarts = append(silenceStarts, start)
-// 			}
-// 		}
-
-// 		if strings.Contains(line, "silence_end:") {
-// 			parts := strings.Split(line, "silence_end:")
-// 			if len(parts) < 2 {
-// 				continue
-// 			}
-// 			endStr := strings.Fields(parts[1])[0]
-// 			end, err := strconv.ParseFloat(endStr, 64)
-// 			if err == nil {
-// 				silenceEnds = append(silenceEnds, end)
-// 			}
-// 		}
-// 	}
-
-// 	// Create talking intervals from gaps between silences
-// 	var lastSilenceEnd float64 = 0
-
-// 	for i := 0; i < len(silenceStarts); i++ {
-// 		start := lastSilenceEnd
-// 		end := silenceStarts[i]
-
-// 		if end > start {
-// 			intervals = append(intervals, SilenceInterval{Start: start, End: end})
-// 		}
-// 		// Update the last silence end
-// 		if i < len(silenceEnds) {
-// 			lastSilenceEnd = silenceEnds[i]
-// 		}
-// 	}
-
-// 	// Final segment after last silence (until end of video)
-// 	if lastSilenceEnd < videoDuration {
-// 		intervals = append(intervals, SilenceInterval{Start: lastSilenceEnd, End: videoDuration})
-// 	}
-
-// 	if len(intervals) == 0 {
-// 		return nil, fmt.Errorf("no talking intervals detected")
-// 	}
-
-// 	return intervals, nil
-// }
-
-// const minClipDurationMs = 50 // Minimum allowed duration for clips in milliseconds
-
-// func SplitVideo(videoFile string, threshold float64, duration float64) error {
-// 	outputDir := fmt.Sprintf("output/%s", strings.TrimSuffix(filepath.Base(videoFile), filepath.Ext(videoFile)))
-// 	os.MkdirAll(outputDir, os.ModePerm)
-
-// 	cmd := exec.Command("ffmpeg",
-// 		"-i", videoFile,
-// 		"-af", fmt.Sprintf("silencedetect=n=%fdB:d=%f", threshold, duration),
-// 		"-f", "null", "-",
-// 	)
-// 	cmdOutput, err := cmd.CombinedOutput()
-// 	if err != nil {
-// 		log.Printf("Error running FFmpeg silencedetect: %v", err)
-// 		log.Printf("FFmpeg output:\n%s", string(cmdOutput))
-// 		return fmt.Errorf("error detecting silence: %v", err)
-// 	}
-
-// 	intervals, err := ParseSilenceOutputToTalkingIntervals(string(cmdOutput), duration)
-// 	if err != nil {
-// 		log.Printf("Error parsing silence output: %v", err)
-// 		return fmt.Errorf("error parsing silence output: %v", err)
-// 	}
-// 	log.Printf("Detected %d raw talking intervals", len(intervals))
-
-// 	var validIntervals []SilenceInterval
-// 	for _, interval := range intervals {
-// 		startMs := int(interval.Start * 1000)
-// 		endMs := int(interval.End * 1000)
-// 		durationMs := endMs - startMs
-
-// 		// Filter by minimum duration
-// 		if durationMs > minClipDurationMs {
-// 			validIntervals = append(validIntervals, interval)
-// 		} else {
-// 			log.Printf("[SKIP] Interval too short: Start=%.2f, End=%.2f, Duration=%dms", interval.Start, interval.End, durationMs)
-// 		}
-// 	}
-// 	log.Printf("Filtered to %d valid intervals", len(validIntervals))
-
-// 	for i, interval := range validIntervals {
-// 		start := interval.Start
-// 		end := interval.End
-// 		outputClip := fmt.Sprintf("%s/clip_%d.mp4", outputDir, i+1)
-
-// 		log.Printf("Creating clip %d: Start=%.2f, End=%.2f", i+1, start, end)
-// 		splitCmd := exec.Command("ffmpeg",
-// 			"-y",
-// 			"-i", videoFile,
-// 			"-ss", fmt.Sprintf("%.2f", start),
-// 			"-to", fmt.Sprintf("%.2f", end),
-// 			"-c", "copy",
-// 			outputClip,
-// 		)
-
-// 		splitOutput, splitErr := splitCmd.CombinedOutput()
-// 		log.Printf("FFmpeg output for clip %d:\n%s", i+1, string(splitOutput)) // Log the output
-
-// 		if splitErr != nil {
-// 			log.Printf("Error creating clip %d (Start=%.2f, End=%.2f): %v", i+1, start, end, splitErr)
-// 			return fmt.Errorf("error creating clip %d: %v", i+1, splitErr)
-// 		}
-// 	}
-
-// 	log.Println("Splitting complete.")
-// 	return nil
-// }
-
-// const minClipDurationMs = 50 // Minimum allowed duration for clips in milliseconds
 
 func ParseSilenceOutputToTalkingIntervals(output string, videoDuration float64) ([]SilenceInterval, error) {
 	var intervals []SilenceInterval
