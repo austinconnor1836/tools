@@ -6,12 +6,16 @@ import (
 )
 
 // TranscribeAudio transcribes audio from a .wav file to text using an external Python script
-func TranscribeAudio(audioFile string) (string, error) {
+func TranscribeAudio(audioFile string) {
+	fmt.Println("🔍 Transcribing video audio to text...")
+
 	// Call the transcribe.py Python script to transcribe the audio file
 	cmd := exec.Command("python", "transcribe.py", audioFile)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("failed to transcribe audio: %v\n%s", err, output)
+		fmt.Printf("❌ Failed to transcribe audio: %v\n%s", err, output)
+		return
 	}
-	return string(output), nil
+
+	fmt.Println("✅ Transcription complete!")
 }

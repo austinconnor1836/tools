@@ -8,3 +8,4 @@ token.json
 *.mp4
 .venv
 output/
+input/
