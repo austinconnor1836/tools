@@ -125,7 +125,7 @@ func main() {
 	case "publish-auto":
 		publishCmd := flag.NewFlagSet("publish-auto", flag.ExitOnError)
 		hashtags := publishCmd.String("hashtags", "", "Comma-separated hashtags")
-		platforms := publishCmd.String("platforms", "youtube,instagram,twitter,facebook,linkedin,reddit", "Platforms to publish to (comma-separated)")
+		platforms := publishCmd.String("platforms", "youtube", "Platforms to publish to (comma-separated)")
 		videoPath := publishCmd.String("video", "", "Path to the video file")
 
 		publishCmd.Parse(os.Args[2:])
