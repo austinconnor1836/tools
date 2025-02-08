@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/skip2/go-qrcode"
 )
 
 func ShowHelp() {
@@ -22,6 +23,22 @@ func ShowHelp() {
 	fmt.Println("  delete-all-branches branch1 branch2    Simulate deleting all local branches except specified")
 	fmt.Println("  transcribe <URL|PATH>                  Download video from URL and extract text")
 	fmt.Println("  split-video                            Split video into clips based on audio")
+}
+
+func generateQRCodeConsole(text string) error {
+	qr, err := qrcode.New(text, qrcode.Medium)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("\nScan this QR code:")
+	fmt.Println(qr.ToSmallString(false)) // Output QR code to console
+	return nil
+}
+
+// clearConsole clears the terminal screen
+func clearConsole() {
+	fmt.Print("\033[H\033[2J") // ANSI escape codes to clear screen
 }
 
 func CopyBranch() {

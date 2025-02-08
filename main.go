@@ -6,6 +6,11 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"syscall"
+
+	"time"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -43,6 +48,19 @@ func main() {
 		// if err := CleanUpFiles("./output/audio.wav", "./output/audio.m4a"); err != nil {
 		// 	log.Printf("Error cleaning up files: %v", err)
 		// }
+	case "script":
+		cmd := flag.NewFlagSet("transcribe", flag.ExitOnError)
+		videoPath := cmd.String("video", "", "Path to the video file")
+		
+		cmd.Parse(os.Args[2:])
+
+		if *videoPath == "" {
+			fmt.Println("Please specify a video file.")
+			return
+		}
+
+		// Step 2: Transcribe the audio to get the text
+		TranscribeAudio(*videoPath)
 	case "download":
 		downloadCommand := flag.NewFlagSet("download", flag.ExitOnError)
 		xFlag := downloadCommand.String("x", "", "Download video from X.com (Twitter) post link")
@@ -159,6 +177,28 @@ func main() {
 
 		fmt.Println("✅ Thumbnail updated successfully!")
 
+	case "qr":
+		fmt.Println("Please enter string to send as QR code.")
+		// Read input securely (hides it while typing/pasting)
+		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+		if err != nil {
+			log.Fatalf("Error reading input: %v", err)
+		}
+		text := string(bytePassword) // Convert bytes to string
+
+		fmt.Println("\nGenerating QR code...")
+
+		// Generate and print QR code
+		err = generateQRCodeConsole(text)
+		if err != nil {
+			log.Fatalf("Failed to generate QR code: %v", err)
+		}
+		// Display QR code for 10 seconds
+		time.Sleep(10 * time.Second)
+
+		// Clear the console to "destroy" the QR code
+		clearConsole()
+		fmt.Println("QR code destroyed.")
 	default:
 		ShowHelp()
 	}
