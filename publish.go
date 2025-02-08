@@ -344,6 +344,49 @@ func uploadThumbnail(service *youtube.Service, videoID, thumbnailPath string) er
 	return fmt.Errorf("failed to upload thumbnail after multiple attempts")
 }
 
+func UpdateThumbnail(videoID, thumbnailPath string) error {
+    fmt.Println("📸 Updating thumbnail for video:", videoID)
+
+    // Authenticate with YouTube API
+    ctx := context.Background()
+    client, err := getOAuthClient(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to get OAuth client: %v", err)
+    }
+
+    service, err := youtube.New(client)
+    if err != nil {
+        return fmt.Errorf("error creating YouTube client: %v", err)
+    }
+
+    // Read thumbnail file
+    thumbnailBytes, err := ioutil.ReadFile(thumbnailPath)
+    if err != nil {
+        return fmt.Errorf("error reading thumbnail file: %v", err)
+    }
+
+    // Exponential backoff (retrying in case of failure)
+    for i := 0; i < 5; i++ {
+        fmt.Printf("Attempting to update thumbnail (Attempt %d/5)...\n", i+1)
+        
+        // Upload thumbnail
+        thumbnailUpload := service.Thumbnails.Set(videoID)
+        thumbnailUpload = thumbnailUpload.Media(bytes.NewReader(thumbnailBytes), googleapi.ContentType("image/png"))
+
+        _, err = thumbnailUpload.Do()
+        if err == nil {
+            fmt.Println("✅ Thumbnail updated successfully!")
+            return nil
+        }
+
+        fmt.Printf("Retrying thumbnail update... Attempt %d/5\n", i+1)
+        time.Sleep(time.Duration(i+1) * 5 * time.Second) // Exponential backoff
+    }
+
+    return fmt.Errorf("failed to update thumbnail after multiple attempts")
+}
+
+
 
 
 func getOAuthClient(ctx context.Context) (*http.Client, error) {

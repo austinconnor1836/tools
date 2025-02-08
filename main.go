@@ -140,6 +140,24 @@ func main() {
 		if err != nil {
 			log.Fatalf("Error publishing video: %v", err)
 		}
+	case "update-thumbnail":
+		updateCmd := flag.NewFlagSet("update-thumbnail", flag.ExitOnError)
+		videoID := updateCmd.String("video-id", "", "YouTube Video ID")
+		thumbnailPath := updateCmd.String("thumbnail", "", "Path to the custom thumbnail image")
+
+		updateCmd.Parse(os.Args[2:])
+
+		if *videoID == "" || *thumbnailPath == "" {
+			fmt.Println("Usage: update-thumbnail --video-id <videoID> --thumbnail <path/to/thumbnail.png>")
+			return
+		}
+
+		err := UpdateThumbnail(*videoID, *thumbnailPath)
+		if err != nil {
+			log.Fatalf("Error updating thumbnail: %v", err)
+		}
+
+		fmt.Println("✅ Thumbnail updated successfully!")
 
 	default:
 		ShowHelp()
