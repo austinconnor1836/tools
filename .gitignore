@@ -9,3 +9,5 @@ token.json
 .venv
 output/
 input/
+tools
+tools.exe
