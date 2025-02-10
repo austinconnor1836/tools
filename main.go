@@ -10,10 +10,16 @@ import (
 
 	"time"
 
+	"github.com/joho/godotenv"
 	"golang.org/x/term"
 )
 
 func main() {
+	// Load .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+	}
 	if len(os.Args) < 2 {
 		ShowHelp()
 		return
@@ -140,8 +146,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("Error splitting video: %v", err)
 		}
-	case "publish-auto":
-		publishCmd := flag.NewFlagSet("publish-auto", flag.ExitOnError)
+	case "publish":
+		publishCmd := flag.NewFlagSet("publish", flag.ExitOnError)
 		hashtags := publishCmd.String("hashtags", "", "Comma-separated hashtags")
 		platforms := publishCmd.String("platforms", "youtube", "Platforms to publish to (comma-separated)")
 		thumbnailPath := publishCmd.String("thumbnail", "", "Path to the custom thumbnail image")
