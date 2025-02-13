@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/rivo/uniseg" // Import the package for correct grapheme counting
 	"golang.org/x/oauth2"
@@ -284,93 +285,6 @@ func CallGPTForTitlesAndDescriptions(transcription string) (map[string]string, e
 	return response, nil
 }
 
-// Upload video and optionally upload a thumbnail
-func PublishVideo(videoPath, title, description, hashtags, platforms, thumbnailPath string) error {
-	platformList := strings.Split(platforms, ",")
-
-	for _, platform := range platformList {
-		platform = strings.TrimSpace(strings.ToLower(platform))
-		fmt.Printf("\n🚀 Uploading to %s...\n", platform)
-
-		switch platform {
-			case "youtube": 
-				fmt.Println("📺 Uploading to YouTube...")
-
-				ctx := context.Background()
-				client, err := getOAuthClient(ctx)
-				if err != nil {
-					log.Fatalf("Failed to get OAuth client: %v", err)
-				}
-
-				service, err := youtube.New(client)
-				if err != nil {
-					log.Fatalf("Error creating YouTube client: %v", err)
-				}
-
-				// Open the video file
-				file, err := os.Open(videoPath)
-				if err != nil {
-					log.Fatalf("Error opening video file: %v", err)
-				}
-				defer file.Close()
-
-				// Define video metadata
-				video := &youtube.Video{
-					Snippet: &youtube.VideoSnippet{
-						Title:                title,
-						Description:          "Support me on Patreon: https://www.patreon.com/c/Polemicyst\n\n" + description + "\n\n" + hashtags,
-						CategoryId:           "25", // 25 = News & Politics
-						Tags:                 formatTags(hashtags),
-						DefaultLanguage:      "en",
-						DefaultAudioLanguage: "en",
-					},
-					Status: &youtube.VideoStatus{
-						PrivacyStatus:           "public",
-						SelfDeclaredMadeForKids: false,
-					},
-				}
-
-				// Upload the video
-				call := service.Videos.Insert([]string{"snippet", "status"}, video)
-				call = call.Media(file)
-
-				response, err := call.Do()
-				if err != nil {
-					log.Fatalf("Error uploading video: %v", err)
-				}
-
-				videoID := response.Id
-				fmt.Printf("✅ YouTube upload successful! Video ID: %s\n", videoID)
-
-				// ✅ Upload thumbnail if the flag is provided
-				if strings.TrimSpace(thumbnailPath) != "" {
-					fmt.Println("📸 Waiting 10 seconds before uploading custom thumbnail...")
-
-					// Delay for 10 seconds to allow YouTube to process the video ID
-					time.Sleep(10 * time.Second)
-
-					err := uploadThumbnail(service, videoID, thumbnailPath)
-					if err != nil {
-						log.Fatalf("Error uploading thumbnail: %v", err)
-					}
-					fmt.Println("✅ Thumbnail uploaded successfully!")
-				}
-			case "bluesky":
-				fmt.Println("📢 Posting to BlueSky...")
-				err := PostToBlueSky(title, description)
-				if err != nil {
-					log.Printf("❌ Failed to post to BlueSky: %v", err)
-				} else {
-					fmt.Println("✅ BlueSky post successful!")
-				}
-			default: 
-				fmt.Printf("⚠️ Unknown platform: %s\n", platform)
-				continue
-		}
-	}
-	return nil
-}
-
 // 📸 Uploads a thumbnail to YouTube with retry logic
 func uploadThumbnail(service *youtube.Service, videoID, thumbnailPath string) error {
 	fmt.Println("📸 Uploading custom thumbnail...")
@@ -439,9 +353,169 @@ func UpdateThumbnail(videoID, thumbnailPath string) error {
     return fmt.Errorf("failed to update thumbnail after multiple attempts")
 }
 
-func PostToBlueSky(title, description string) error {
-	// const blueskyAPI = "https://bsky.social/xrpc/com.atproto.repo.createRecord"
-	// Retrieve credentials
+// Upload video and optionally upload a thumbnail
+func PublishVideo(videoPath, title, description, hashtags, platforms, thumbnailPath string) error {
+	// platformList := strings.Split(platforms, ",")
+
+	fmt.Println("📺 Uploading to YouTube...")
+
+	ctx := context.Background()
+	client, err := getOAuthClient(ctx)
+	if err != nil {
+		log.Fatalf("Failed to get OAuth client: %v", err)
+	}
+
+	service, err := youtube.New(client)
+	if err != nil {
+		log.Fatalf("Error creating YouTube client: %v", err)
+	}
+
+	// Open the video file
+	file, err := os.Open(videoPath)
+	if err != nil {
+		log.Fatalf("Error opening video file: %v", err)
+	}
+	defer file.Close()
+
+	// Define video metadata
+	video := &youtube.Video{
+		Snippet: &youtube.VideoSnippet{
+			Title:                title,
+			Description:          "Support me on Patreon: https://www.patreon.com/c/Polemicyst\n\n" + description + "\n\n" + hashtags,
+			CategoryId:           "25", // 25 = News & Politics
+			Tags:                 formatTags(hashtags),
+			DefaultLanguage:      "en",
+			DefaultAudioLanguage: "en",
+		},
+		Status: &youtube.VideoStatus{
+			PrivacyStatus:           "public",
+			SelfDeclaredMadeForKids: false,
+		},
+	}
+
+	// Upload the video
+	call := service.Videos.Insert([]string{"snippet", "status"}, video)
+	call = call.Media(file)
+
+	response, err := call.Do()
+	if err != nil {
+		log.Fatalf("Error uploading video: %v", err)
+	}
+
+	videoID := response.Id
+	youtubeLink := fmt.Sprintf("https://youtu.be/%s", videoID)
+	fmt.Printf("✅ YouTube upload successful! Video Link: %s\n", youtubeLink)
+	// fmt.Printf("✅ YouTube upload successful! Video ID: %s\n", videoID)
+
+	// ✅ Upload thumbnail if the flag is provided
+	if strings.TrimSpace(thumbnailPath) != "" {
+		fmt.Println("📸 Waiting 10 seconds before uploading custom thumbnail...")
+
+		// Delay for 10 seconds to allow YouTube to process the video ID
+		time.Sleep(10 * time.Second)
+
+		err := uploadThumbnail(service, videoID, thumbnailPath)
+		if err != nil {
+			log.Fatalf("Error uploading thumbnail: %v", err)
+		}
+		fmt.Println("✅ Thumbnail uploaded successfully!")
+	}
+
+	fmt.Println("📢 Posting to BlueSky...")
+	err = PostToBlueSky(title, description, youtubeLink)
+	if err != nil {
+		log.Printf("❌ Failed to post to BlueSky: %v", err)
+	} else {
+		fmt.Println("✅ BlueSky post successful!")
+	}
+
+	// for _, platform := range platformList {
+	// 	platform = strings.TrimSpace(strings.ToLower(platform))
+	// 	fmt.Printf("\n🚀 Uploading to %s...\n", platform)
+
+	// 	switch platform {
+	// 		case "youtube": 
+	// 			fmt.Println("📺 Uploading to YouTube...")
+
+	// 			ctx := context.Background()
+	// 			client, err := getOAuthClient(ctx)
+	// 			if err != nil {
+	// 				log.Fatalf("Failed to get OAuth client: %v", err)
+	// 			}
+
+	// 			service, err := youtube.New(client)
+	// 			if err != nil {
+	// 				log.Fatalf("Error creating YouTube client: %v", err)
+	// 			}
+
+	// 			// Open the video file
+	// 			file, err := os.Open(videoPath)
+	// 			if err != nil {
+	// 				log.Fatalf("Error opening video file: %v", err)
+	// 			}
+	// 			defer file.Close()
+
+	// 			// Define video metadata
+	// 			video := &youtube.Video{
+	// 				Snippet: &youtube.VideoSnippet{
+	// 					Title:                title,
+	// 					Description:          "Support me on Patreon: https://www.patreon.com/c/Polemicyst\n\n" + description + "\n\n" + hashtags,
+	// 					CategoryId:           "25", // 25 = News & Politics
+	// 					Tags:                 formatTags(hashtags),
+	// 					DefaultLanguage:      "en",
+	// 					DefaultAudioLanguage: "en",
+	// 				},
+	// 				Status: &youtube.VideoStatus{
+	// 					PrivacyStatus:           "public",
+	// 					SelfDeclaredMadeForKids: false,
+	// 				},
+	// 			}
+
+	// 			// Upload the video
+	// 			call := service.Videos.Insert([]string{"snippet", "status"}, video)
+	// 			call = call.Media(file)
+
+	// 			response, err := call.Do()
+	// 			if err != nil {
+	// 				log.Fatalf("Error uploading video: %v", err)
+	// 			}
+
+	// 			videoID := response.Id
+	// 			fmt.Printf("✅ YouTube upload successful! Video ID: %s\n", videoID)
+
+	// 			// ✅ Upload thumbnail if the flag is provided
+	// 			if strings.TrimSpace(thumbnailPath) != "" {
+	// 				fmt.Println("📸 Waiting 10 seconds before uploading custom thumbnail...")
+
+	// 				// Delay for 10 seconds to allow YouTube to process the video ID
+	// 				time.Sleep(10 * time.Second)
+
+	// 				err := uploadThumbnail(service, videoID, thumbnailPath)
+	// 				if err != nil {
+	// 					log.Fatalf("Error uploading thumbnail: %v", err)
+	// 				}
+	// 				fmt.Println("✅ Thumbnail uploaded successfully!")
+	// 			}
+	// 		case "bluesky":
+	// 			fmt.Println("📢 Posting to BlueSky...")
+	// 			err := PostToBlueSky(title, description)
+	// 			if err != nil {
+	// 				log.Printf("❌ Failed to post to BlueSky: %v", err)
+	// 			} else {
+	// 				fmt.Println("✅ BlueSky post successful!")
+	// 			}
+	// 		default: 
+	// 			fmt.Printf("⚠️ Unknown platform: %s\n", platform)
+	// 			continue
+	// 	}
+	// }
+	return nil
+}
+
+
+
+func PostToBlueSky(title, description, youtubeLink string) error {
+	// Retrieve BlueSky credentials
 	username := os.Getenv("BLUESKY_USERNAME")
 	password := os.Getenv("BLUESKY_PASSWORD")
 
@@ -450,56 +524,61 @@ func PostToBlueSky(title, description string) error {
 	}
 
 	// Authenticate to BlueSky
-    accessToken, did, err := authenticateToBlueSky(username, password)
-    if err != nil {
-        return fmt.Errorf("❌ Failed to authenticate to BlueSky: %v", err)
-    }
-
-    // Ensure description does not exceed 300 characters
-    maxLength := 300
-    postContent := fmt.Sprintf("📢 %s\n\n%s", title, description)
-	if uniseg.GraphemeClusterCount(
-		description) > maxLength {
-			postContent = truncateText(postContent, maxLength)
+	accessToken, did, err := authenticateToBlueSky(username, password)
+	if err != nil {
+		return fmt.Errorf("❌ Failed to authenticate to BlueSky: %v", err)
 	}
 
-    // Format the post
-	fmt.Printf("✅ Post length: %d graphemes\n", uniseg.GraphemeClusterCount(postContent))
+	// ✅ Create payload for the BlueSky post
+	postData := map[string]interface{}{
+		"repo": did,
+		"collection": "app.bsky.feed.post",
+		"record": map[string]interface{}{
+			"$type": "app.bsky.feed.post",
+			"text":  "",
+			"createdAt": time.Now().Format(time.RFC3339),
+			"embed": map[string]interface{}{
+				"$type": "app.bsky.embed.external",
+				"external": map[string]interface{}{
+					"uri":   youtubeLink,
+					"title": title,
+					"description": description,
+				},
+			},
+		},
+	}
 
-    payload := map[string]interface{}{
-        "repo": did,
-        "collection": "app.bsky.feed.post",
-        "record": map[string]interface{}{
-            "text": postContent,
-            "createdAt": time.Now().Format(time.RFC3339),
-        },
-    }
+	// ✅ Convert payload to JSON
+	postBody, err := json.Marshal(postData)
+	if err != nil {
+		return fmt.Errorf("❌ Failed to encode BlueSky post: %v", err)
+	}
 
-    payloadBytes, _ := json.Marshal(payload)
-    req, err := http.NewRequest("POST", "https://bsky.social/xrpc/com.atproto.repo.createRecord", bytes.NewBuffer(payloadBytes))
-    if err != nil {
-        return fmt.Errorf("❌ Failed to create request: %v", err)
-    }
+	// ✅ Send request to BlueSky API
+	req, err := http.NewRequest("POST", "https://bsky.social/xrpc/com.atproto.repo.createRecord", bytes.NewBuffer(postBody))
+	if err != nil {
+		return fmt.Errorf("❌ Failed to create BlueSky post request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
 
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("Authorization", "Bearer "+accessToken)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("❌ Failed to post to BlueSky: %v", err)
+	}
+	defer resp.Body.Close()
 
-    client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        return fmt.Errorf("❌ Failed to send request: %v", err)
-    }
-    defer resp.Body.Close()
+	// ✅ Handle response
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("❌ BlueSky API error: %d %s\nResponse: %s", resp.StatusCode, http.StatusText(resp.StatusCode), string(body))
+	}
 
-    body, _ := ioutil.ReadAll(resp.Body)
-
-    if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("❌ BlueSky API error: %s\nResponse: %s", resp.Status, body)
-    }
-
-    fmt.Println("✅ Successfully posted to BlueSky!")
-    return nil
+	fmt.Println("✅ BlueSky post with embedded YouTube link created successfully!")
+	return nil
 }
+
 
 // BlueSky authentication function
 func authenticateToBlueSky(username, password string) (string, string, error) {
@@ -553,22 +632,35 @@ func authenticateToBlueSky(username, password string) (string, string, error) {
 	return authResponse.AccessJwt, authResponse.Did, nil
 }
 
-// truncateText ensures the text is at most `maxGraphemes` long.
-func truncateText(text string, maxGraphemes int) string {
-    graphemes := uniseg.NewGraphemes(text)
-    var truncated strings.Builder
-    count := 0
+// truncateText shortens the description while preserving whole words and avoiding broken graphemes.
+func truncateText(text string, maxLength int) string {
+	if uniseg.GraphemeClusterCount(text) <= maxLength {
+		return text
+	}
 
-    for graphemes.Next() {
-        if count >= maxGraphemes {
-            break
-        }
-        truncated.WriteString(graphemes.Str())
-        count++
-    }
+	// Normalize text to prevent cutting in the middle of a grapheme
+	normText := norm.NFC.String(text)
 
-    return truncated.String()
+	// Split into words
+	words := strings.Fields(normText)
+	truncated := ""
+	count := 0
+
+	for _, word := range words {
+		wordLength := uniseg.GraphemeClusterCount(word)
+		if count+wordLength+1 > maxLength { // +1 for space
+			break
+		}
+		if count > 0 {
+			truncated += " "
+		}
+		truncated += word
+		count += wordLength + 1
+	}
+
+	return truncated + "..." // Append ellipsis if truncated
 }
+
 
 
 
