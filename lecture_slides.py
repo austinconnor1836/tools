@@ -16,6 +16,7 @@ import argparse
 import base64
 import concurrent.futures
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -160,6 +161,31 @@ def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path):
     return True
 
 
+def demote_headers(md: str) -> str:
+    """Shift every ATX heading down one level (# -> ##, ## -> ###, ...)."""
+    return re.sub(r"^(#{1,5})(?= +\S)", r"#\1", md, flags=re.MULTILINE)
+
+
+def clean_title(stem: str) -> str:
+    """Heuristically turn a messy filename stem into a human-readable title.
+
+    Strips Coursera-style hex hashes, module/video markers (M4_V5_), format/
+    resolution tags (_MP4_240), parenthetical dupe markers ((1)); replaces
+    separators with spaces and splits camelCase.
+    """
+    s = stem
+    s = re.sub(r"^_?[a-f0-9]{12,}_+", "", s)           # leading hash
+    s = re.sub(r"^M\d+_+V\d+_+", "", s)                # M4_V5_
+    s = re.sub(r"_+(MP4|MOV|MKV|WEBM|AVI)(_+\d+p?)?$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"_+\d+p?$", "", s)                     # trailing resolution
+    s = re.sub(r"\s*\(\d+\)$", "", s)                  # trailing " (1)"
+    s = s.strip(" _-")
+    s = re.sub(r"[_\-]+", " ", s)
+    s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)         # camelCase split
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)    # ABCWord -> ABC Word
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def fmt_ts(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -171,6 +197,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video", type=Path, help="Lecture video file")
     ap.add_argument("-o", "--output", type=Path, required=True, help="Output .md path")
+    ap.add_argument("--title", type=str, default=None,
+                    help="Document title (rendered as `#`). Defaults to a cleaned-up "
+                         "version of the video filename.")
     ap.add_argument("-i", "--interval", type=float, default=2.0,
                     help="Seconds between sampled frames (default 2.0; lower=more coverage)")
     ap.add_argument("--hash-threshold", type=int, default=20,
@@ -220,14 +249,15 @@ def main():
 
         results.sort(key=lambda r: r[0])
 
-        lines = []
+        title = args.title or clean_title(args.video.stem)
+        lines = [f"# {title}", ""]
         for i, ts, fp, content, err in results:
             if err:
                 lines.append(f"*extraction failed at {fmt_ts(ts)}: {err}*")
                 lines.append("")
                 continue
             if content.text.strip():
-                lines.append(content.text.strip())
+                lines.append(demote_headers(content.text.strip()))
                 lines.append("")
             for j, d in enumerate(content.diagrams):
                 crop_name = f"{out_md.stem}_s{i + 1:03d}_fig{j + 1}.png"
