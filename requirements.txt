@@ -5,3 +5,4 @@ pydantic
 playwright
 httpx
 pymupdf
+google-genai

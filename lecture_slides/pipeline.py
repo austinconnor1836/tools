@@ -1,7 +1,8 @@
-"""Core pipeline: video/PDF → frames → dedup → Claude vision → markdown."""
+"""Core pipeline: video/PDF → frames → dedup → vision LLM → markdown."""
 
 import base64
 import concurrent.futures
+import json
 import os
 import re
 import subprocess
@@ -9,7 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import anthropic
 import fitz  # PyMuPDF
 from PIL import Image
 
@@ -63,7 +63,33 @@ def dedupe_frames(frames: list[tuple[float, Path]], threshold: int) -> list[tupl
     return kept
 
 
-def analyze_slide(client: anthropic.Anthropic, frame_path: Path) -> SlideContent:
+def _analyze_slide_gemini(client, frame_path: Path) -> SlideContent:
+    """Analyze a slide image using Google Gemini."""
+    from google.genai import types
+
+    img_bytes = frame_path.read_bytes()
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                    types.Part.from_text(text=VLM_PROMPT + "\n\nRespond with JSON matching this schema:\n"
+                        + json.dumps(SlideContent.model_json_schema(), indent=2)),
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=SlideContent,
+        ),
+    )
+    return SlideContent.model_validate_json(response.text)
+
+
+def _analyze_slide_claude(client, frame_path: Path) -> SlideContent:
+    """Analyze a slide image using Claude."""
     data = base64.standard_b64encode(frame_path.read_bytes()).decode("utf-8")
     response = client.messages.parse(
         model="claude-sonnet-4-6",
@@ -80,6 +106,24 @@ def analyze_slide(client: anthropic.Anthropic, frame_path: Path) -> SlideContent
         output_format=SlideContent,
     )
     return response.parsed_output
+
+
+def _make_vision_client() -> tuple:
+    """Create a vision client, preferring Gemini (free) over Claude.
+
+    Returns (client, analyze_fn) where analyze_fn(client, path) -> SlideContent.
+    """
+    if os.environ.get("GEMINI_API_KEY"):
+        from google import genai
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        return client, _analyze_slide_gemini, "gemini-2.5-flash"
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        import anthropic
+        client = anthropic.Anthropic()
+        return client, _analyze_slide_claude, "claude-sonnet-4-6"
+
+    raise RuntimeError("set GEMINI_API_KEY or ANTHROPIC_API_KEY in your environment or .env")
 
 
 def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path, pad: float = 0.02) -> bool:
@@ -137,8 +181,8 @@ def process_video(
     """Run the full pipeline on a single video file. Returns the path to the written .md file."""
     if not video.exists():
         raise FileNotFoundError(f"video not found: {video}")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("set ANTHROPIC_API_KEY in your environment or .env")
+
+    client, analyze_fn, model_name = _make_vision_client()
 
     out_md = output_md.resolve()
     out_dir = out_md.parent
@@ -156,13 +200,12 @@ def process_video(
         unique = dedupe_frames(raw, hash_threshold)
         print(f"      kept {len(unique)} unique slides", file=sys.stderr)
 
-        print(f"[3/3] analyzing {len(unique)} slides with claude-sonnet-4-6...", file=sys.stderr)
-        client = anthropic.Anthropic()
+        print(f"[3/3] analyzing {len(unique)} slides with {model_name}...", file=sys.stderr)
 
         def work(idx_item):
             i, (ts, fp) = idx_item
             try:
-                return i, ts, fp, analyze_slide(client, fp), None
+                return i, ts, fp, analyze_fn(client, fp), None
             except Exception as e:
                 return i, ts, fp, None, e
 
@@ -226,8 +269,8 @@ def process_pdf(
     """Run the slide extraction pipeline on a PDF file. Returns the path to the written .md file."""
     if not pdf.exists():
         raise FileNotFoundError(f"PDF not found: {pdf}")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("set ANTHROPIC_API_KEY in your environment or .env")
+
+    client, analyze_fn, model_name = _make_vision_client()
 
     out_md = output_md.resolve()
     out_dir = out_md.parent
@@ -245,13 +288,12 @@ def process_pdf(
         unique = dedupe_frames(raw, hash_threshold)
         print(f"      kept {len(unique)} unique slides", file=sys.stderr)
 
-        print(f"[3/3] analyzing {len(unique)} slides with claude-sonnet-4-6...", file=sys.stderr)
-        client = anthropic.Anthropic()
+        print(f"[3/3] analyzing {len(unique)} slides with {model_name}...", file=sys.stderr)
 
         def work(idx_item):
             i, (page_num, fp) = idx_item
             try:
-                return i, page_num, fp, analyze_slide(client, fp), None
+                return i, page_num, fp, analyze_fn(client, fp), None
             except Exception as e:
                 return i, page_num, fp, None, e
 
