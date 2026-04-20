@@ -18,18 +18,28 @@ class SlideContent(BaseModel):
     diagrams: list[Diagram] = Field(default_factory=list)
 
 
-VLM_PROMPT = """Transcribe this lecture slide.
+VLM_PROMPT = """Transcribe this lecture slide into well-formatted markdown.
 
-- `text`: verbatim content exactly as shown, preserved with markdown. Use `#` \
-for the slide title and `##`+ for any sub-headings. Preserve bullets, \
-`$inline$` and `$$display$$` math, and code blocks. Do NOT paraphrase or \
-summarize.
+- `text`: verbatim content exactly as shown, formatted as clean markdown.
 
-  COMPLETENESS IS CRITICAL. Before finalizing, count every bullet / line / \
-item visible in the image and confirm each one appears in your output. Do \
-NOT skip trailing bullets just because they seem like less-important asides \
-— transcribe EVERY visible line, even short ones. If a bullet is partially \
-cut off but legible, include as much as you can read.
+  FORMATTING RULES (critical):
+  - Use `#` for the slide title and `##`+ for any sub-headings.
+  - Each bullet point MUST be on its own line, prefixed with `- ` or `* `.
+  - Separate paragraphs and distinct blocks of text with a blank line.
+  - Display math (centered equations) MUST use `$$...$$` on its own line,
+    with blank lines before and after.
+  - Inline math uses `$...$`.
+  - Preserve code blocks with triple backticks.
+  - Do NOT run separate sentences or ideas together on one line. If text
+    appears on separate lines in the slide, keep them on separate lines.
+
+  COMPLETENESS IS CRITICAL. Before finalizing, count every bullet / line /
+  item visible in the image and confirm each one appears in your output. Do
+  NOT skip trailing bullets just because they seem like less-important asides
+  — transcribe EVERY visible line, even short ones. If a bullet is partially
+  cut off but legible, include as much as you can read.
+
+  Do NOT paraphrase or summarize. Preserve exact wording.
 
   Return "" (empty) AND no diagrams for boilerplate / non-content slides:
   - blank slides or slides showing only the presenter's webcam
@@ -43,10 +53,10 @@ cut off but legible, include as much as you can read.
   name, copyright line, slide number) — transcribe only the lecture content
   itself. If after stripping boilerplate nothing remains, return "".
 
-- `diagrams`: for each non-text visual element that conveys lecture content \
-(figure, chart, plot, graph, flowchart, schematic, architecture diagram), \
-return a bounding box in normalized [x1, y1, x2, y2] coords where (0,0) is \
-top-left and (1,1) is bottom-right, plus a brief caption. IGNORE: the \
-presenter's webcam / video feed (usually a small rectangular inset showing \
-the speaker), logos, institutional crests, page numbers, decorative \
-background patterns. Return [] if the slide is text-only or boilerplate."""
+- `diagrams`: for each non-text visual element that conveys lecture content
+  (figure, chart, plot, graph, flowchart, schematic, architecture diagram),
+  return a bounding box in normalized [x1, y1, x2, y2] coords where (0,0) is
+  top-left and (1,1) is bottom-right, plus a brief caption. IGNORE: the
+  presenter's webcam / video feed (usually a small rectangular inset showing
+  the speaker), logos, institutional crests, page numbers, decorative
+  background patterns. Return [] if the slide is text-only or boilerplate."""
