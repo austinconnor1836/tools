@@ -53,10 +53,19 @@ VLM_PROMPT = """Transcribe this lecture slide into well-formatted markdown.
   name, copyright line, slide number) — transcribe only the lecture content
   itself. If after stripping boilerplate nothing remains, return "".
 
-- `diagrams`: for each non-text visual element that conveys lecture content
-  (figure, chart, plot, graph, flowchart, schematic, architecture diagram),
-  return a bounding box in normalized [x1, y1, x2, y2] coords where (0,0) is
-  top-left and (1,1) is bottom-right, plus a brief caption. IGNORE: the
-  presenter's webcam / video feed (usually a small rectangular inset showing
-  the speaker), logos, institutional crests, page numbers, decorative
-  background patterns. Return [] if the slide is text-only or boilerplate."""
+- `diagrams`: ONLY for actual visual figures that cannot be represented as
+  text: plots, graphs, charts, flowcharts, schematics, architecture diagrams,
+  photographs, hand-drawn illustrations. Return a bounding box in normalized
+  [x1, y1, x2, y2] coords where (0,0) is top-left and (1,1) is bottom-right,
+  plus a brief caption.
+
+  DO NOT include as diagrams:
+  - Matrices, tables, or grids of numbers (transcribe these as text/math)
+  - Equations or mathematical expressions (transcribe as LaTeX)
+  - Transition probability matrices (transcribe as text)
+  - Simple state labels or numbered lists
+  - The presenter's webcam / video feed
+  - Logos, institutional crests, page numbers, decorative backgrounds
+
+  Return [] for most slides — only include entries for genuine visual figures
+  that lose meaning if not shown as an image."""
