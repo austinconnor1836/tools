@@ -126,7 +126,7 @@ def _make_vision_client() -> tuple:
     raise RuntimeError("set GEMINI_API_KEY or ANTHROPIC_API_KEY in your environment or .env")
 
 
-def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path, pad: float = 0.02) -> bool:
+def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path, pad: float = 0.05) -> bool:
     """Crop a diagram region from an image. `pad` adds margin as a fraction of image size."""
     img = Image.open(frame_path)
     w, h = img.size
