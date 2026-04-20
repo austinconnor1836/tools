@@ -1,0 +1,290 @@
+"""Core pipeline: video/PDF → frames → dedup → Claude vision → markdown."""
+
+import base64
+import concurrent.futures
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import anthropic
+import fitz  # PyMuPDF
+from PIL import Image
+
+from .models import SlideContent, VLM_PROMPT
+
+
+def sample_frames(video: Path, out_dir: Path, interval: float) -> list[tuple[float, Path]]:
+    """Sample one frame every `interval` seconds using ffmpeg."""
+    pattern = str(out_dir / "raw_%05d.jpg")
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-i", str(video),
+         "-vf", f"fps=1/{interval}",
+         "-q:v", "2", pattern],
+        check=True,
+    )
+    files = sorted(out_dir.glob("raw_*.jpg"))
+    return [(i * interval, fp) for i, fp in enumerate(files)]
+
+
+def phash(img_path: Path, size: int = 16) -> int:
+    """Simple average-hash on a grayscale downsample. Returns a `size*size`-bit int."""
+    img = Image.open(img_path).convert("L").resize((size, size), Image.LANCZOS)
+    pixels = img.tobytes()
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for i, p in enumerate(pixels):
+        if p >= avg:
+            bits |= 1 << i
+    return bits
+
+
+def hamming(a: int, b: int) -> int:
+    return (a ^ b).bit_count()
+
+
+def dedupe_frames(frames: list[tuple[float, Path]], threshold: int) -> list[tuple[float, Path]]:
+    """Split into segments on big consecutive-frame hash jumps; keep the LAST frame of each
+    segment so build-on slides are captured in their final, most-complete state."""
+    if not frames:
+        return []
+    hashes = [phash(fp) for _, fp in frames]
+    boundaries = [0]
+    for i in range(1, len(frames)):
+        if hamming(hashes[i], hashes[i - 1]) > threshold:
+            boundaries.append(i)
+    boundaries.append(len(frames))
+    kept: list[tuple[float, Path]] = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        kept.append(frames[end - 1])
+    return kept
+
+
+def analyze_slide(client: anthropic.Anthropic, frame_path: Path) -> SlideContent:
+    data = base64.standard_b64encode(frame_path.read_bytes()).decode("utf-8")
+    response = client.messages.parse(
+        model="claude-sonnet-4-6",
+        max_tokens=8192,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg", "data": data,
+                }},
+                {"type": "text", "text": VLM_PROMPT},
+            ],
+        }],
+        output_format=SlideContent,
+    )
+    return response.parsed_output
+
+
+def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path, pad: float = 0.02) -> bool:
+    """Crop a diagram region from an image. `pad` adds margin as a fraction of image size."""
+    img = Image.open(frame_path)
+    w, h = img.size
+    x1, y1, x2, y2 = bbox
+    box = (
+        max(0, int((x1 - pad) * w)),
+        max(0, int((y1 - pad) * h)),
+        min(w, int((x2 + pad) * w)),
+        min(h, int((y2 + pad) * h)),
+    )
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return False
+    img.crop(box).save(out_path)
+    return True
+
+
+def demote_headers(md: str) -> str:
+    """Shift every ATX heading down one level (# -> ##, ## -> ###, ...)."""
+    return re.sub(r"^(#{1,5})(?= +\S)", r"#\1", md, flags=re.MULTILINE)
+
+
+def clean_title(stem: str) -> str:
+    """Heuristically turn a messy filename stem into a human-readable title."""
+    s = stem
+    s = re.sub(r"^_?[a-f0-9]{12,}_+", "", s)
+    s = re.sub(r"^M\d+_+V\d+_+", "", s)
+    s = re.sub(r"_+(MP4|MOV|MKV|WEBM|AVI)(_+\d+p?)?$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"_+\d+p?$", "", s)
+    s = re.sub(r"\s*\(\d+\)$", "", s)
+    s = s.strip(" _-")
+    s = re.sub(r"[_\-]+", " ", s)
+    s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def fmt_ts(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def process_video(
+    video: Path,
+    output_md: Path,
+    title: str | None = None,
+    interval: float = 2.0,
+    hash_threshold: int = 20,
+    workers: int = 4,
+) -> Path:
+    """Run the full pipeline on a single video file. Returns the path to the written .md file."""
+    if not video.exists():
+        raise FileNotFoundError(f"video not found: {video}")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("set ANTHROPIC_API_KEY in your environment or .env")
+
+    out_md = output_md.resolve()
+    out_dir = out_md.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = out_dir / f"{out_md.stem}_assets"
+    asset_dir.mkdir(exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as td:
+        frame_dir = Path(td)
+        print(f"[1/3] sampling frames every {interval}s...", file=sys.stderr)
+        raw = sample_frames(video, frame_dir, interval)
+        print(f"      sampled {len(raw)} frames", file=sys.stderr)
+
+        print(f"[2/3] deduping via perceptual hash (threshold={hash_threshold})...", file=sys.stderr)
+        unique = dedupe_frames(raw, hash_threshold)
+        print(f"      kept {len(unique)} unique slides", file=sys.stderr)
+
+        print(f"[3/3] analyzing {len(unique)} slides with claude-sonnet-4-6...", file=sys.stderr)
+        client = anthropic.Anthropic()
+
+        def work(idx_item):
+            i, (ts, fp) = idx_item
+            try:
+                return i, ts, fp, analyze_slide(client, fp), None
+            except Exception as e:
+                return i, ts, fp, None, e
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(work, it): it for it in enumerate(unique)}
+            for done, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                results.append(fut.result())
+                print(f"      {done}/{len(unique)} done", file=sys.stderr)
+
+        results.sort(key=lambda r: r[0])
+
+        title = title or clean_title(video.stem)
+        lines = [f"# {title}", ""]
+        for i, ts, fp, content, err in results:
+            if err:
+                lines.append(f"*extraction failed at {fmt_ts(ts)}: {err}*")
+                lines.append("")
+                continue
+            if content.text.strip():
+                lines.append(demote_headers(content.text.strip()))
+                lines.append("")
+            for j, d in enumerate(content.diagrams):
+                crop_name = f"{out_md.stem}_s{i + 1:03d}_fig{j + 1}.png"
+                crop_path = asset_dir / crop_name
+                if crop_diagram(fp, d.bbox, crop_path):
+                    rel = crop_path.relative_to(out_dir).as_posix()
+                    lines.append(f"![{d.caption}]({rel})")
+                    lines.append(f"*{d.caption}*")
+                    lines.append("")
+
+        out_md.write_text("\n".join(lines), encoding="utf-8")
+        print(f"\nwrote {out_md}", file=sys.stderr)
+        print(f"assets in {asset_dir}", file=sys.stderr)
+
+    return out_md
+
+
+def pdf_to_images(pdf_path: Path, out_dir: Path, dpi: int = 200) -> list[tuple[int, Path]]:
+    """Render each PDF page to a JPEG image. Returns [(page_num, image_path)]."""
+    doc = fitz.open(pdf_path)
+    pages = []
+    zoom = dpi / 72
+    mat = fitz.Matrix(zoom, zoom)
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(matrix=mat)
+        img_path = out_dir / f"page_{i + 1:04d}.jpg"
+        pix.save(str(img_path))
+        pages.append((i + 1, img_path))
+    doc.close()
+    return pages
+
+
+def process_pdf(
+    pdf: Path,
+    output_md: Path,
+    title: str | None = None,
+    hash_threshold: int = 20,
+    workers: int = 4,
+) -> Path:
+    """Run the slide extraction pipeline on a PDF file. Returns the path to the written .md file."""
+    if not pdf.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf}")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("set ANTHROPIC_API_KEY in your environment or .env")
+
+    out_md = output_md.resolve()
+    out_dir = out_md.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    asset_dir = out_dir / f"{out_md.stem}_assets"
+    asset_dir.mkdir(exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as td:
+        img_dir = Path(td)
+        print(f"[1/3] converting PDF pages to images...", file=sys.stderr)
+        raw = pdf_to_images(pdf, img_dir)
+        print(f"      rendered {len(raw)} pages", file=sys.stderr)
+
+        print(f"[2/3] deduping via perceptual hash (threshold={hash_threshold})...", file=sys.stderr)
+        unique = dedupe_frames(raw, hash_threshold)
+        print(f"      kept {len(unique)} unique slides", file=sys.stderr)
+
+        print(f"[3/3] analyzing {len(unique)} slides with claude-sonnet-4-6...", file=sys.stderr)
+        client = anthropic.Anthropic()
+
+        def work(idx_item):
+            i, (page_num, fp) = idx_item
+            try:
+                return i, page_num, fp, analyze_slide(client, fp), None
+            except Exception as e:
+                return i, page_num, fp, None, e
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(work, it): it for it in enumerate(unique)}
+            for done, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                results.append(fut.result())
+                print(f"      {done}/{len(unique)} done", file=sys.stderr)
+
+        results.sort(key=lambda r: r[0])
+
+        title = title or clean_title(pdf.stem)
+        lines = [f"# {title}", ""]
+        for i, page_num, fp, content, err in results:
+            if err:
+                lines.append(f"*extraction failed for page {page_num}: {err}*")
+                lines.append("")
+                continue
+            if content.text.strip():
+                lines.append(demote_headers(content.text.strip()))
+                lines.append("")
+            for j, d in enumerate(content.diagrams):
+                crop_name = f"{out_md.stem}_p{page_num:03d}_fig{j + 1}.png"
+                crop_path = asset_dir / crop_name
+                if crop_diagram(fp, d.bbox, crop_path):
+                    rel = crop_path.relative_to(out_dir).as_posix()
+                    lines.append(f"![{d.caption}]({rel})")
+                    lines.append(f"*{d.caption}*")
+                    lines.append("")
+
+        out_md.write_text("\n".join(lines), encoding="utf-8")
+        print(f"\nwrote {out_md}", file=sys.stderr)
+        print(f"assets in {asset_dir}", file=sys.stderr)
+
+    return out_md

@@ -3,12 +3,21 @@
 Scripts in this repo assume a `.env` file in the repo root with keys like
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc. `.env` is gitignored.
 
-## `lecture_slides.py`
+## `lecture_slides/` package
+
+The `lecture_slides.py` shim at the repo root is a backwards-compat entry point;
+all logic lives in the `lecture_slides/` package:
+
+- `models.py` — Pydantic models (`Diagram`, `SlideContent`) and `VLM_PROMPT`
+- `pipeline.py` — frame sampling, dedup, Claude vision, cropping, `process_video()`
+- `coursera.py` — Playwright login, course discovery, video download, `scrape_course()`
+- `cli.py` — argparse entry points (`video` and `course` subcommands)
+- `__main__.py` — enables `python -m lecture_slides`
 
 Pipeline: ffmpeg samples frames from a lecture video → perceptual-hash dedup →
 Claude vision transcribes each unique frame → markdown + cropped diagram assets.
 
-When modifying this script, preserve these invariants:
+When modifying this package, preserve these invariants:
 
 **Boilerplate filter (VLM prompt).** Must return empty text AND no diagrams for
 non-content slides: course title cards ("Introduction to ___ with <instructor>"),
@@ -35,4 +44,4 @@ only `#`.
 
 **Cross-platform.** No OS-specific logic (paths, shell commands, string
 filters). Dependencies: `ffmpeg` on PATH, `python-dotenv`, `anthropic`,
-`pillow`, `pydantic`.
+`pillow`, `pydantic`, `playwright`, `httpx`.

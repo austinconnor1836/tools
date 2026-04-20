@@ -1,0 +1,7 @@
+anthropic
+python-dotenv
+pillow
+pydantic
+playwright
+httpx
+pymupdf

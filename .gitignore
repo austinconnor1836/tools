@@ -3,6 +3,7 @@ credentials.json
 cookies.txt
 token.json
 *.txt
+!requirements.txt
 *.wav
 *.m4a
 *.mp4
