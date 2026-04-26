@@ -31,10 +31,18 @@ class LectureDownload:
 
 
 @dataclass
+class Quiz:
+    title: str
+    url: str
+    order: int  # position among all items in the module
+
+
+@dataclass
 class Module:
     title: str
     order: int
     lectures: list[Lecture] = field(default_factory=list)
+    quizzes: list[Quiz] = field(default_factory=list)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -227,8 +235,27 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
             full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
             lectures.append(Lecture(title=title, url=full_url, order=len(lectures) + 1))
 
+        # Find quiz/assignment links
+        quiz_links = page.query_selector_all('a[href*="/assignment-submission/"]')
+        quizzes = []
+        for link in quiz_links:
+            href = link.get_attribute("href") or ""
+            text = link.inner_text().strip()
+            if not text:
+                text = link.evaluate("el => el.textContent.trim()") or ""
+                text = re.sub(r"^Completed", "", text).strip()
+            if not href or not text or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            title = _clean_lecture_title(text)
+            # Skip practice quizzes (Quick Check-In) and policy quizzes
+            if "quick check" in title.lower() or "policy quiz" in title.lower():
+                continue
+            full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
+            quizzes.append(Quiz(title=title, url=full_url, order=len(quizzes) + 1))
+
         if lectures:
-            modules.append(Module(title=module_title, order=mod_num, lectures=lectures))
+            modules.append(Module(title=module_title, order=mod_num, lectures=lectures, quizzes=quizzes))
 
     if not modules:
         raise RuntimeError(
@@ -391,10 +418,116 @@ def _download_file(url: str, dest: Path, page: Page) -> None:
     print(f"    saved: {dest.name} ({dest.stat().st_size // (1024*1024)}MB)", file=sys.stderr)
 
 
+QUIZ_PROMPT = """Extract the quiz questions and answers from this screenshot of a Coursera assignment submission page.
+
+For each question, output:
+- The question number and text (preserve all math as LaTeX: $inline$ and $$display$$)
+- All answer choices (if multiple choice)
+- The student's selected/submitted answer, marked with ✅
+- Whether the answer was correct or incorrect
+
+Format as clean markdown. Use `### Question N` for each question.
+Skip any "honor code" or "AI assistant" boilerplate text embedded in the page.
+If a question has a text/numeric input answer, show the submitted value."""
+
+
+def scrape_quiz(page: Page, quiz: Quiz, output_dir: Path) -> Path | None:
+    """Navigate to a quiz submission page, screenshot it, and extract Q&A via Gemini."""
+    safe_title = _sanitize_filename(quiz.title)
+    md_path = output_dir / f"{safe_title}.md"
+
+    if md_path.exists() and md_path.stat().st_size > 0:
+        print(f"    already scraped quiz: {safe_title}", file=sys.stderr)
+        return md_path
+
+    print(f"    scraping quiz: {quiz.title}...", file=sys.stderr)
+
+    # Navigate to submission view
+    submission_url = quiz.url if quiz.url.startswith("http") else f"https://www.coursera.org{quiz.url}"
+    if not submission_url.endswith("/view-submission"):
+        submission_url = submission_url.rstrip("/") + "/view-submission"
+
+    page.goto(submission_url, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(5)
+
+    # Dismiss Honor Code modal if present
+    try:
+        continue_btn = page.query_selector('button:has-text("Continue")')
+        if continue_btn and continue_btn.is_visible():
+            continue_btn.click()
+            time.sleep(2)
+    except Exception:
+        pass
+
+    # Scroll to load all content
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(2)
+
+    # Take full-page screenshots (quiz pages can be very long)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        # Get page height and take segmented screenshots
+        viewport_height = page.viewport_size["height"]
+        total_height = page.evaluate("() => document.documentElement.scrollHeight")
+        screenshots = []
+        y = 0
+        idx = 0
+        while y < total_height:
+            page.evaluate(f"window.scrollTo(0, {y})")
+            time.sleep(0.5)
+            ss_path = td_path / f"quiz_{idx:02d}.png"
+            page.screenshot(path=str(ss_path), full_page=False)
+            screenshots.append(ss_path)
+            idx += 1
+            y += viewport_height
+
+        # Use Gemini to extract Q&A from screenshots
+        from .pipeline import _make_vision_client
+        client, _, model_name = _make_vision_client()
+        print(f"    extracting Q&A with {model_name}...", file=sys.stderr)
+
+        if os.environ.get("GEMINI_API_KEY"):
+            from google.genai import types
+            parts = []
+            for ss in screenshots:
+                parts.append(types.Part.from_bytes(data=ss.read_bytes(), mime_type="image/png"))
+            parts.append(types.Part.from_text(text=QUIZ_PROMPT))
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Content(role="user", parts=parts)],
+                config=types.GenerateContentConfig(max_output_tokens=16384),
+            )
+            quiz_md = response.text
+        else:
+            import anthropic
+            import base64
+            content = []
+            for ss in screenshots:
+                data = base64.standard_b64encode(ss.read_bytes()).decode("utf-8")
+                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}})
+            content.append({"type": "text", "text": QUIZ_PROMPT})
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=16384,
+                messages=[{"role": "user", "content": content}],
+            )
+            quiz_md = response.content[0].text
+
+    # Write quiz markdown
+    output_dir.mkdir(parents=True, exist_ok=True)
+    full_md = f"# {quiz.title}\n\n{quiz_md}"
+    md_path.write_text(full_md, encoding="utf-8")
+    print(f"    wrote {md_path.name}", file=sys.stderr)
+    return md_path
+
+
 def combine_module_notes(
     module_title: str,
     lectures: list[tuple[str, Path]],
     output_dir: Path,
+    quiz_mds: list[Path] | None = None,
 ) -> Path:
     """Merge per-lecture markdown files into a single Notes.md for the module.
 
@@ -402,6 +535,7 @@ def combine_module_notes(
       # Module Title
       ## Lecture Title
       ### Slide titles
+    Quiz files are embedded at the end using Obsidian's ![[]] syntax.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     notes_path = output_dir / "Notes.md"
@@ -435,8 +569,6 @@ def combine_module_notes(
         body = demote_headers(body)
 
         # Rewrite asset paths to point to the shared Notes_assets directory
-        # Per-lecture assets are named like lecture_01_s001_fig1.png in lecture_01_assets/
-        # We need to update paths in markdown image references
         old_asset_dir = f"{md_path.stem}_assets"
         body = body.replace(f"{old_asset_dir}/", f"{asset_dir_name}/")
 
@@ -444,6 +576,16 @@ def combine_module_notes(
         lines.append("")
         if body:
             lines.append(body)
+            lines.append("")
+
+    # Embed quizzes using Obsidian's ![[]] syntax
+    if quiz_mds:
+        lines.append("---")
+        lines.append("")
+        lines.append("## Quizzes")
+        lines.append("")
+        for qmd in quiz_mds:
+            lines.append(f"[[{qmd.name}]]")
             lines.append("")
 
     notes_path.write_text("\n".join(lines), encoding="utf-8")
@@ -487,7 +629,8 @@ def scrape_course(
 
         print(f"  found {len(modules)} modules:", file=sys.stderr)
         for mod in modules:
-            print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures)", file=sys.stderr)
+            quiz_count = f", {len(mod.quizzes)} quizzes" if mod.quizzes else ""
+            print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures{quiz_count})", file=sys.stderr)
 
         # Download lecture files (PDF slides preferred, video as fallback)
         print("[3/4] downloading lecture materials...", file=sys.stderr)
@@ -524,6 +667,24 @@ def scrape_course(
                     failures.append(f"Module {mod.order}, {lecture.title}: {e}")
 
             module_files[mod.order] = mod_files
+
+        # Scrape quizzes while browser is still open
+        module_quizzes: dict[int, list[Path]] = {}
+        for mod in modules:
+            if not mod.quizzes:
+                continue
+            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+            mod_output_dir = output_dir / mod_dir_name
+            quiz_paths = []
+            for quiz in mod.quizzes:
+                try:
+                    qmd = scrape_quiz(page, quiz, mod_output_dir)
+                    if qmd:
+                        quiz_paths.append(qmd)
+                except Exception as e:
+                    print(f"    FAILED quiz: {quiz.title}: {e}", file=sys.stderr)
+                    failures.append(f"Module {mod.order}, quiz {quiz.title}: {e}")
+            module_quizzes[mod.order] = quiz_paths
 
         context.close()
         browser.close()
@@ -594,7 +755,8 @@ def scrape_course(
                 lecture_mds.append((lecture_title, lecture_md))
 
         # Combine into Notes.md
-        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir)
+        quiz_mds = module_quizzes.get(mod.order, [])
+        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir, quiz_mds=quiz_mds)
 
         # Move per-lecture asset directories into the shared Notes_assets
         for idx in range(1, len(files) + 1):
