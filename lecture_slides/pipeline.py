@@ -143,6 +143,57 @@ def crop_diagram(frame_path: Path, bbox: list[float], out_path: Path, pad: float
     return True
 
 
+ENRICH_PROMPT = """You are given lecture slide notes (markdown) and the instructor's spoken transcript for the same lecture.
+
+Your task: enrich the slide notes by interleaving relevant transcript content where it adds insight.
+
+RULES:
+- Keep ALL existing slide content EXACTLY as-is. Do not modify, rephrase, or remove any existing text, math, headings, or image references.
+- Add transcript insights as blockquotes (> ) placed AFTER the relevant slide section they explain.
+- Only add transcript content that provides additional explanation, examples, intuition, or context beyond what's already on the slide.
+- Skip transcript segments that merely read the slide text verbatim — those add no value.
+- Preserve the exact heading hierarchy (# ## ### etc.).
+- Preserve all image references (![...](...)) exactly as they appear.
+- Do not add any commentary of your own — only use the instructor's words from the transcript.
+
+Return the complete enriched markdown document."""
+
+
+def enrich_with_transcript(slide_md: str, transcript: str) -> str:
+    """Enrich slide notes with relevant transcript excerpts using an LLM."""
+    client, _, model_name = _make_vision_client()
+    print(f"      using {model_name} for transcript enrichment", file=sys.stderr)
+
+    if os.environ.get("GEMINI_API_KEY"):
+        from google.genai import types
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(
+                        text=f"{ENRICH_PROMPT}\n\n---\n\n## SLIDE NOTES:\n\n{slide_md}\n\n---\n\n## TRANSCRIPT:\n\n{transcript}"
+                    )],
+                ),
+            ],
+            config=types.GenerateContentConfig(
+                max_output_tokens=65536,
+            ),
+        )
+        return response.text
+    else:
+        import anthropic
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=16384,
+            messages=[{
+                "role": "user",
+                "content": f"{ENRICH_PROMPT}\n\n---\n\n## SLIDE NOTES:\n\n{slide_md}\n\n---\n\n## TRANSCRIPT:\n\n{transcript}",
+            }],
+        )
+        return response.content[0].text
+
+
 def demote_headers(md: str) -> str:
     """Shift every ATX heading down one level (# -> ##, ## -> ###, ...)."""
     return re.sub(r"^(#{1,5})(?= +\S)", r"#\1", md, flags=re.MULTILINE)

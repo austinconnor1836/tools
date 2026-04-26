@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
-from .pipeline import process_pdf, process_video, demote_headers, clean_title
+from .pipeline import process_pdf, process_video, enrich_with_transcript, demote_headers, clean_title
 
 SESSION_DIR = Path.home() / ".cache" / "lecture_slides"
 SESSION_FILE = SESSION_DIR / "coursera_session.json"
@@ -276,23 +276,26 @@ def get_lecture_downloads(page: Page) -> list[LectureDownload]:
     return downloads
 
 
-def download_lecture(page: Page, lecture: Lecture, dest_dir: Path) -> tuple[Path, str]:
+def download_lecture(page: Page, lecture: Lecture, dest_dir: Path) -> tuple[Path, str, Path | None]:
     """Navigate to a lecture page, check for PDF slides, fall back to video.
 
-    Returns (file_path, kind) where kind is 'pdf' or 'video'.
+    Returns (file_path, kind, transcript_path) where kind is 'pdf' or 'video'.
+    transcript_path is None if no transcript was available.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe_title = _sanitize_filename(lecture.title)
+    transcript_path = dest_dir / f"{lecture.order:02d}_{safe_title}.txt"
 
     # Check if we already have either format
     pdf_path = dest_dir / f"{lecture.order:02d}_{safe_title}.pdf"
     mp4_path = dest_dir / f"{lecture.order:02d}_{safe_title}.mp4"
+    tx_path = transcript_path if transcript_path.exists() and transcript_path.stat().st_size > 0 else None
     if pdf_path.exists() and pdf_path.stat().st_size > 0:
         print(f"    already downloaded: {pdf_path.name}", file=sys.stderr)
-        return pdf_path, "pdf"
+        return pdf_path, "pdf", tx_path
     if mp4_path.exists() and mp4_path.stat().st_size > 0:
         print(f"    already downloaded: {mp4_path.name}", file=sys.stderr)
-        return mp4_path, "video"
+        return mp4_path, "video", tx_path
 
     print(f"    checking downloads: {lecture.title}...", file=sys.stderr)
 
@@ -303,29 +306,38 @@ def download_lecture(page: Page, lecture: Lecture, dest_dir: Path) -> tuple[Path
     # Get available downloads
     downloads = get_lecture_downloads(page)
 
+    # Download transcript if available
+    txt_dl = next((d for d in downloads if d.kind == "txt" and "transcript" in d.label.lower()), None)
+    if txt_dl:
+        print(f"    downloading transcript...", file=sys.stderr)
+        _download_file(txt_dl.url, transcript_path, page)
+
     # Prefer PDF slides over video
     pdf_dl = next((d for d in downloads if d.kind == "pdf"), None)
     if pdf_dl:
         print(f"    downloading PDF slides: {pdf_dl.label}...", file=sys.stderr)
         _download_file(pdf_dl.url, pdf_path, page)
-        return pdf_path, "pdf"
+        tx = transcript_path if transcript_path.exists() and transcript_path.stat().st_size > 0 else None
+        return pdf_path, "pdf", tx
 
     # Fall back to video — prefer 1080p
     video_dl = next(
         (d for d in downloads if d.kind == "mp4" and "1080" in d.label),
         next((d for d in downloads if d.kind == "mp4"), None),
     )
+    tx = transcript_path if transcript_path.exists() and transcript_path.stat().st_size > 0 else None
+
     if video_dl:
         print(f"    downloading video: {video_dl.label}...", file=sys.stderr)
         _download_file(video_dl.url, mp4_path, page)
-        return mp4_path, "video"
+        return mp4_path, "video", tx
 
     # Last resort: try to extract video URL from the player
     video_url = _try_video_source(page)
     if video_url:
         print(f"    downloading video (from player)...", file=sys.stderr)
         _download_file(video_url, mp4_path, page)
-        return mp4_path, "video"
+        return mp4_path, "video", tx
 
     raise RuntimeError(f"Could not find slides or video for: {lecture.title}")
 
@@ -478,30 +490,31 @@ def scrape_course(
         dl_dir = output_dir / ".downloads"
         dl_dir.mkdir(exist_ok=True)
 
-        # (title, path, kind) where kind is "pdf" or "video"
-        module_files: dict[int, list[tuple[str, Path, str]]] = {}
+        # (title, path, kind, transcript_path)
+        module_files: dict[int, list[tuple[str, Path, str, Path | None]]] = {}
         failures: list[str] = []
 
         for mod in modules:
             mod_dl_dir = dl_dir / f"module_{mod.order:02d}"
-            mod_files: list[tuple[str, Path, str]] = []
+            mod_files: list[tuple[str, Path, str, Path | None]] = []
 
             for lecture in mod.lectures:
                 if skip_download:
                     safe_title = _sanitize_filename(lecture.title)
-                    # Check for either format
+                    tx_path = mod_dl_dir / f"{lecture.order:02d}_{safe_title}.txt"
+                    tx = tx_path if tx_path.exists() and tx_path.stat().st_size > 0 else None
                     for ext, kind in [(".pdf", "pdf"), (".mp4", "video")]:
                         expected = mod_dl_dir / f"{lecture.order:02d}_{safe_title}{ext}"
                         if expected.exists():
-                            mod_files.append((lecture.title, expected, kind))
+                            mod_files.append((lecture.title, expected, kind, tx))
                             break
                     else:
                         print(f"    skipped (not found): {safe_title}", file=sys.stderr)
                     continue
 
                 try:
-                    file_path, kind = download_lecture(page, lecture, mod_dl_dir)
-                    mod_files.append((lecture.title, file_path, kind))
+                    file_path, kind, transcript = download_lecture(page, lecture, mod_dl_dir)
+                    mod_files.append((lecture.title, file_path, kind, transcript))
                 except Exception as e:
                     print(f"    FAILED: {lecture.title}: {e}", file=sys.stderr)
                     failures.append(f"Module {mod.order}, {lecture.title}: {e}")
@@ -530,7 +543,7 @@ def scrape_course(
 
         lecture_mds: list[tuple[str, Path]] = []
 
-        for idx, (lecture_title, file_path, kind) in enumerate(files, 1):
+        for idx, (lecture_title, file_path, kind, transcript_path) in enumerate(files, 1):
             lecture_stem = f"lecture_{idx:02d}"
             lecture_md = mod_output_dir / f"{lecture_stem}.md"
 
@@ -558,6 +571,18 @@ def scrape_course(
                         hash_threshold=hash_threshold,
                         workers=workers,
                     )
+
+                # Enrich with transcript if available
+                if transcript_path and lecture_md.exists():
+                    print(f"    enriching with transcript...", file=sys.stderr)
+                    try:
+                        slide_md = lecture_md.read_text(encoding="utf-8")
+                        transcript = transcript_path.read_text(encoding="utf-8")
+                        enriched = enrich_with_transcript(slide_md, transcript)
+                        lecture_md.write_text(enriched, encoding="utf-8")
+                    except Exception as e:
+                        print(f"    transcript enrichment failed: {e}", file=sys.stderr)
+
                 lecture_mds.append((lecture_title, lecture_md))
             except Exception as e:
                 print(f"    FAILED: {lecture_title}: {e}", file=sys.stderr)
