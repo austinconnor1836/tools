@@ -191,18 +191,22 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
                 continue
             break
 
-        # Get the module title — it's the first h2 with the module-specific
-        # heading class, not the course title or chat panel headings.
-        # Coursera renders: course title (h2) → module title (h2) → section headings (h2)
-        # The module title is the second h2 on the page.
+        # Get the module title. Skip banners ("Congratulations", "Rate this
+        # course", "Chat with us", etc.) by finding the first h2 whose text
+        # doesn't match known non-module patterns, excluding the course title.
         module_title = f"Module {mod_num}"
-        headings = page.query_selector_all("h2")
-        if len(headings) >= 2:
-            candidate = headings[1].inner_text().strip().split("\n")[0].strip()
-            # Skip if it's the course title (same as first h2) or a chat heading
-            first_h2 = headings[0].inner_text().strip().split("\n")[0].strip()
-            if candidate and candidate != first_h2 and "Chat" not in candidate:
-                module_title = candidate
+        course_title_el = page.query_selector("h2")
+        course_title = course_title_el.inner_text().strip().split("\n")[0] if course_title_el else ""
+        skip_patterns = ["congratulations", "rate this", "chat with", "next course",
+                         "you increased", "skill score"]
+        for h2 in page.query_selector_all("h2"):
+            text = h2.inner_text().strip().split("\n")[0].strip()
+            if not text or text == course_title:
+                continue
+            if any(p in text.lower() for p in skip_patterns):
+                continue
+            module_title = text
+            break
 
         # Find lecture links (videos only, not readings/quizzes)
         links = page.query_selector_all('a[href*="/lecture/"]')
