@@ -38,11 +38,19 @@ class Quiz:
 
 
 @dataclass
+class ProgrammingAssignment:
+    title: str
+    url: str
+    order: int
+
+
+@dataclass
 class Module:
     title: str
     order: int
     lectures: list[Lecture] = field(default_factory=list)
     quizzes: list[Quiz] = field(default_factory=list)
+    assignments: list[ProgrammingAssignment] = field(default_factory=list)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -254,8 +262,27 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
             full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
             quizzes.append(Quiz(title=title, url=full_url, order=len(quizzes) + 1))
 
+        # Find programming assignment links (R only)
+        prog_links = page.query_selector_all('a[href*="/programming/"]')
+        assignments = []
+        for link in prog_links:
+            href = link.get_attribute("href") or ""
+            text = link.inner_text().strip()
+            if not text:
+                text = link.evaluate("el => el.textContent.trim()") or ""
+                text = re.sub(r"^Completed", "", text).strip()
+            if not href or not text or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            title = _clean_lecture_title(text)
+            # Only include R assignments
+            if "(r)" not in title.lower():
+                continue
+            full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
+            assignments.append(ProgrammingAssignment(title=title, url=full_url, order=len(assignments) + 1))
+
         if lectures:
-            modules.append(Module(title=module_title, order=mod_num, lectures=lectures, quizzes=quizzes))
+            modules.append(Module(title=module_title, order=mod_num, lectures=lectures, quizzes=quizzes, assignments=assignments))
 
     if not modules:
         raise RuntimeError(
@@ -523,11 +550,106 @@ def scrape_quiz(page: Page, quiz: Quiz, output_dir: Path) -> Path | None:
     return md_path
 
 
+def download_notebook(page: Page, context, assignment: ProgrammingAssignment, output_dir: Path) -> Path | None:
+    """Launch a Coursera lab, download the Jupyter notebook via API."""
+    safe_title = _sanitize_filename(assignment.title)
+    ipynb_path = output_dir / f"{safe_title}.ipynb"
+
+    if ipynb_path.exists() and ipynb_path.stat().st_size > 0:
+        print(f"    already downloaded notebook: {ipynb_path.name}", file=sys.stderr)
+        return ipynb_path
+
+    print(f"    downloading notebook: {assignment.title}...", file=sys.stderr)
+
+    # Navigate to the assignment page
+    url = assignment.url if assignment.url.startswith("http") else f"https://www.coursera.org{assignment.url}"
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(5)
+
+    # Dismiss Honor Code modal
+    try:
+        btn = page.query_selector('button:has-text("Continue")')
+        if btn and btn.is_visible():
+            btn.click()
+            time.sleep(2)
+    except Exception:
+        pass
+
+    # Click "Launch lab" and capture the new tab
+    launch_btn = page.query_selector('button:has-text("Launch lab"), button:has-text("Open lab")')
+    if not launch_btn:
+        print(f"    no Launch lab button found", file=sys.stderr)
+        return None
+
+    try:
+        with context.expect_page(timeout=60000) as new_page_info:
+            launch_btn.click()
+        lab_page = new_page_info.value
+        lab_page.wait_for_load_state("domcontentloaded", timeout=60000)
+        time.sleep(5)
+    except Exception as e:
+        print(f"    failed to open lab: {e}", file=sys.stderr)
+        return None
+
+    try:
+        # Wait for the iframe to appear — labs can take a while to spin up
+        print(f"    waiting for lab to load...", file=sys.stderr)
+        try:
+            lab_page.wait_for_selector("iframe", timeout=60000)
+        except Exception:
+            pass
+        time.sleep(5)
+
+        iframe_el = lab_page.query_selector("iframe")
+        if not iframe_el:
+            print(f"    no iframe found in lab page", file=sys.stderr)
+            return None
+
+        iframe_src = iframe_el.get_attribute("src") or ""
+        if "/notebooks/" not in iframe_src:
+            print(f"    unexpected iframe src: {iframe_src[:80]}", file=sys.stderr)
+            return None
+
+        # Use Jupyter's REST API to download the notebook JSON
+        api_url = iframe_src.replace("/notebooks/", "/api/contents/")
+        print(f"    fetching notebook via API...", file=sys.stderr)
+
+        api_page = context.new_page()
+        api_page.goto(api_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+
+        body = api_page.inner_text("body")
+        api_page.close()
+
+        if not body.startswith("{"):
+            print(f"    API response not JSON: {body[:100]}", file=sys.stderr)
+            return None
+
+        import json
+        data = json.loads(body)
+        notebook_content = data.get("content")
+        if not notebook_content:
+            print(f"    no content in API response", file=sys.stderr)
+            return None
+
+        # Save the notebook
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(ipynb_path, "w", encoding="utf-8") as f:
+            json.dump(notebook_content, f, indent=1)
+
+        print(f"    saved: {ipynb_path.name}", file=sys.stderr)
+        return ipynb_path
+
+    finally:
+        lab_page.close()
+
+
 def combine_module_notes(
     module_title: str,
     lectures: list[tuple[str, Path]],
     output_dir: Path,
     quiz_mds: list[Path] | None = None,
+    notebook_paths: list[Path] | None = None,
 ) -> Path:
     """Merge per-lecture markdown files into a single Notes.md for the module.
 
@@ -535,7 +657,7 @@ def combine_module_notes(
       # Module Title
       ## Lecture Title
       ### Slide titles
-    Quiz files are embedded at the end using Obsidian's ![[]] syntax.
+    Quiz and notebook files are linked at the end using Obsidian's [[]] syntax.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     notes_path = output_dir / "Notes.md"
@@ -578,7 +700,7 @@ def combine_module_notes(
             lines.append(body)
             lines.append("")
 
-    # Embed quizzes using Obsidian's ![[]] syntax
+    # Embed quizzes using Obsidian's [[]] syntax
     if quiz_mds:
         lines.append("---")
         lines.append("")
@@ -586,6 +708,17 @@ def combine_module_notes(
         lines.append("")
         for qmd in quiz_mds:
             lines.append(f"[[{qmd.name}]]")
+            lines.append("")
+
+    # Embed programming assignments using Obsidian's [[]] syntax
+    if notebook_paths:
+        if not quiz_mds:
+            lines.append("---")
+            lines.append("")
+        lines.append("## Programming Assignments")
+        lines.append("")
+        for nb in notebook_paths:
+            lines.append(f"[[{nb.name}]]")
             lines.append("")
 
     notes_path.write_text("\n".join(lines), encoding="utf-8")
@@ -629,8 +762,13 @@ def scrape_course(
 
         print(f"  found {len(modules)} modules:", file=sys.stderr)
         for mod in modules:
-            quiz_count = f", {len(mod.quizzes)} quizzes" if mod.quizzes else ""
-            print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures{quiz_count})", file=sys.stderr)
+            extras = []
+            if mod.quizzes:
+                extras.append(f"{len(mod.quizzes)} quizzes")
+            if mod.assignments:
+                extras.append(f"{len(mod.assignments)} assignments")
+            extra_str = f", {', '.join(extras)}" if extras else ""
+            print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures{extra_str})", file=sys.stderr)
 
         # Download lecture files (PDF slides preferred, video as fallback)
         print("[3/4] downloading lecture materials...", file=sys.stderr)
@@ -685,6 +823,24 @@ def scrape_course(
                     print(f"    FAILED quiz: {quiz.title}: {e}", file=sys.stderr)
                     failures.append(f"Module {mod.order}, quiz {quiz.title}: {e}")
             module_quizzes[mod.order] = quiz_paths
+
+        # Download programming assignment notebooks
+        module_notebooks: dict[int, list[Path]] = {}
+        for mod in modules:
+            if not mod.assignments:
+                continue
+            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+            mod_output_dir = output_dir / mod_dir_name
+            nb_paths = []
+            for assignment in mod.assignments:
+                try:
+                    nb = download_notebook(page, context, assignment, mod_output_dir)
+                    if nb:
+                        nb_paths.append(nb)
+                except Exception as e:
+                    print(f"    FAILED notebook: {assignment.title}: {e}", file=sys.stderr)
+                    failures.append(f"Module {mod.order}, notebook {assignment.title}: {e}")
+            module_notebooks[mod.order] = nb_paths
 
         context.close()
         browser.close()
@@ -756,7 +912,8 @@ def scrape_course(
 
         # Combine into Notes.md
         quiz_mds = module_quizzes.get(mod.order, [])
-        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir, quiz_mds=quiz_mds)
+        nb_paths = module_notebooks.get(mod.order, [])
+        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir, quiz_mds=quiz_mds, notebook_paths=nb_paths)
 
         # Move per-lecture asset directories into the shared Notes_assets
         for idx in range(1, len(files) + 1):
