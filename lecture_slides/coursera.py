@@ -275,8 +275,9 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
                 continue
             seen_urls.add(href)
             title = _clean_lecture_title(text)
-            # Only include R assignments
-            if "(r)" not in title.lower():
+            # Only include R assignments — titles use "(R)" or "in R"
+            title_lower = title.lower()
+            if "(r)" not in title_lower and not title_lower.endswith(" in r") and " in r " not in title_lower:
                 continue
             full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
             assignments.append(ProgrammingAssignment(title=title, url=full_url, order=len(assignments) + 1))
