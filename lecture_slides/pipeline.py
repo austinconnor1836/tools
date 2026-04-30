@@ -156,7 +156,21 @@ RULES:
 - Preserve all image references (![...](...)) exactly as they appear.
 - Do not add any commentary of your own — only use the instructor's words from the transcript.
 
-Return the complete enriched markdown document."""
+Return the complete enriched markdown document. Do NOT wrap the output in a code fence (```markdown)."""
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove wrapping ```markdown ... ``` code fences from LLM output."""
+    stripped = text.strip()
+    if stripped.startswith("```markdown"):
+        stripped = stripped[len("```markdown"):].strip()
+    elif stripped.startswith("```md"):
+        stripped = stripped[len("```md"):].strip()
+    elif stripped.startswith("```"):
+        stripped = stripped[3:].strip()
+    if stripped.endswith("```"):
+        stripped = stripped[:-3].strip()
+    return stripped
 
 
 def enrich_with_transcript(slide_md: str, transcript: str) -> str:
@@ -180,7 +194,7 @@ def enrich_with_transcript(slide_md: str, transcript: str) -> str:
                 max_output_tokens=65536,
             ),
         )
-        return response.text
+        return _strip_code_fence(response.text)
     else:
         import anthropic
         response = client.messages.create(
@@ -191,7 +205,7 @@ def enrich_with_transcript(slide_md: str, transcript: str) -> str:
                 "content": f"{ENRICH_PROMPT}\n\n---\n\n## SLIDE NOTES:\n\n{slide_md}\n\n---\n\n## TRANSCRIPT:\n\n{transcript}",
             }],
         )
-        return response.content[0].text
+        return _strip_code_fence(response.content[0].text)
 
 
 def demote_headers(md: str) -> str:

@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
-from .pipeline import process_pdf, process_video, enrich_with_transcript, demote_headers, clean_title
+from .pipeline import process_pdf, process_video, enrich_with_transcript, _strip_code_fence, demote_headers, clean_title
 
 SESSION_DIR = Path.home() / ".cache" / "lecture_slides"
 SESSION_FILE = SESSION_DIR / "coursera_session.json"
@@ -611,7 +611,7 @@ def scrape_quiz(page: Page, quiz: Quiz, output_dir: Path) -> Path | None:
                 contents=[types.Content(role="user", parts=parts)],
                 config=types.GenerateContentConfig(max_output_tokens=16384),
             )
-            quiz_md = response.text
+            quiz_md = _strip_code_fence(response.text)
         else:
             import anthropic
             import base64
@@ -791,7 +791,7 @@ def scrape_reading(page: Page, reading: Reading, output_dir: Path) -> Path | Non
                 contents=[types.Content(role="user", parts=parts)],
                 config=types.GenerateContentConfig(max_output_tokens=16384),
             )
-            reading_md = response.text
+            reading_md = _strip_code_fence(response.text)
         else:
             import base64
             content = []
