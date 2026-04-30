@@ -52,6 +52,15 @@ class Reading:
 
 
 @dataclass
+class ModuleItem:
+    """A single item in a module, preserving page order."""
+    kind: str  # "lecture", "quiz", "assignment", "reading"
+    title: str
+    url: str
+    order: int  # position in the module page (1-indexed)
+
+
+@dataclass
 class Module:
     title: str
     order: int
@@ -59,6 +68,7 @@ class Module:
     quizzes: list[Quiz] = field(default_factory=list)
     assignments: list[ProgrammingAssignment] = field(default_factory=list)
     readings: list[Reading] = field(default_factory=list)
+    items: list[ModuleItem] = field(default_factory=list)  # all items in page order
 
 
 def _sanitize_filename(name: str) -> str:
@@ -314,9 +324,50 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
             full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
             readings.append(Reading(title=title, url=full_url, order=len(readings) + 1))
 
+        # Build ordered items list from all content links in DOM order
+        all_content_links = page.query_selector_all(
+            'a[href*="/lecture/"], a[href*="/supplement/"], '
+            'a[href*="/assignment-submission/"], a[href*="/programming/"]'
+        )
+        items: list[ModuleItem] = []
+        seen_item_urls: set[str] = set()
+        for link in all_content_links:
+            href = link.get_attribute("href") or ""
+            if not href or href in seen_item_urls:
+                continue
+            text = link.inner_text().strip()
+            if not text:
+                text = link.evaluate("el => el.textContent.trim()") or ""
+                text = re.sub(r"^Completed", "", text).strip()
+            if not text:
+                continue
+            title = _clean_lecture_title(text)
+            # Determine kind and apply filters
+            if "/lecture/" in href:
+                kind = "lecture"
+            elif "/supplement/" in href:
+                if any(p in title.lower() for p in skip_reading_patterns):
+                    continue
+                kind = "reading"
+            elif "/assignment-submission/" in href:
+                if "quick check" in title.lower() or "policy quiz" in title.lower():
+                    continue
+                kind = "quiz"
+            elif "/programming/" in href:
+                title_lower = title.lower()
+                if "(r)" not in title_lower and not title_lower.endswith(" in r") and " in r " not in title_lower:
+                    continue
+                kind = "assignment"
+            else:
+                continue
+            seen_item_urls.add(href)
+            full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
+            items.append(ModuleItem(kind=kind, title=title, url=full_url, order=len(items) + 1))
+
         if lectures:
             modules.append(Module(title=module_title, order=mod_num, lectures=lectures,
-                                  quizzes=quizzes, assignments=assignments, readings=readings))
+                                  quizzes=quizzes, assignments=assignments, readings=readings,
+                                  items=items))
 
     if not modules:
         raise RuntimeError(
@@ -762,92 +813,107 @@ def scrape_reading(page: Page, reading: Reading, output_dir: Path) -> Path | Non
 
 def combine_module_notes(
     module_title: str,
-    lectures: list[tuple[str, Path]],
+    lecture_mds: dict[str, Path],
     output_dir: Path,
-    quiz_mds: list[Path] | None = None,
-    notebook_paths: list[Path] | None = None,
-    reading_mds: list[Path] | None = None,
+    quiz_mds: dict[str, Path] | None = None,
+    notebook_paths: dict[str, Path] | None = None,
+    reading_mds: dict[str, Path] | None = None,
+    ordered_items: list[ModuleItem] | None = None,
 ) -> Path:
     """Merge per-lecture markdown files into a single Notes.md for the module.
 
-    Each lecture's content (with slide titles at ##) is demoted one level so that:
-      # Module Title
-      ## Lecture Title
-      ### Slide titles
-    Quiz and notebook files are linked at the end using Obsidian's [[]] syntax.
+    All items are interleaved in the order they appear on the Coursera page.
+    Lectures get their content inlined; quizzes, assignments, and readings
+    are linked with Obsidian's [[]] syntax, all at the ## heading level.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     notes_path = output_dir / "Notes.md"
     asset_dir_name = "Notes_assets"
+    quiz_mds = quiz_mds or {}
+    notebook_paths = notebook_paths or {}
+    reading_mds = reading_mds or {}
 
     lines = [f"# {module_title}", ""]
 
-    for lecture_title, md_path in lectures:
-        if not md_path.exists():
-            lines.append(f"## {lecture_title}")
-            lines.append("")
-            lines.append("*Processing failed for this lecture.*")
-            lines.append("")
-            continue
+    if ordered_items:
+        for item in ordered_items:
+            if item.kind == "lecture":
+                md_path = lecture_mds.get(item.title)
+                if not md_path or not md_path.exists():
+                    lines.append(f"## {item.title}")
+                    lines.append("")
+                    lines.append("*Processing failed for this lecture.*")
+                    lines.append("")
+                    continue
 
-        content = md_path.read_text(encoding="utf-8")
+                content = md_path.read_text(encoding="utf-8")
+                content_lines = content.split("\n")
+                body_lines = []
+                skipped_title = False
+                for line in content_lines:
+                    if not skipped_title and line.startswith("# ") and not line.startswith("## "):
+                        skipped_title = True
+                        continue
+                    body_lines.append(line)
 
-        # Strip the per-lecture `# title` line
-        content_lines = content.split("\n")
-        body_lines = []
-        skipped_title = False
-        for line in content_lines:
-            if not skipped_title and line.startswith("# ") and not line.startswith("## "):
-                skipped_title = True
+                body = "\n".join(body_lines).strip()
+                body = demote_headers(body)
+                old_asset_dir = f"{md_path.stem}_assets"
+                body = body.replace(f"{old_asset_dir}/", f"{asset_dir_name}/")
+
+                lines.append(f"## {item.title}")
+                lines.append("")
+                if body:
+                    lines.append(body)
+                    lines.append("")
+
+            elif item.kind == "quiz":
+                key = _sanitize_filename(item.title)
+                qmd = quiz_mds.get(key)
+                if qmd:
+                    lines.append(f"## [[{qmd.name}]]")
+                    lines.append("")
+
+            elif item.kind == "assignment":
+                key = _sanitize_filename(item.title)
+                nb = notebook_paths.get(key)
+                if nb:
+                    lines.append(f"## [[{nb.name}]]")
+                    lines.append("")
+
+            elif item.kind == "reading":
+                key = _sanitize_filename(item.title)
+                rmd = reading_mds.get(key)
+                if rmd:
+                    lines.append(f"## [[{rmd.name}]]")
+                    lines.append("")
+    else:
+        # Fallback: lectures only (no ordered items available)
+        for title, md_path in lecture_mds.items():
+            if not md_path.exists():
+                lines.append(f"## {title}")
+                lines.append("")
+                lines.append("*Processing failed for this lecture.*")
+                lines.append("")
                 continue
-            body_lines.append(line)
-
-        body = "\n".join(body_lines).strip()
-
-        # Demote headers one more level (## -> ###, etc.) so slide titles become ###
-        body = demote_headers(body)
-
-        # Rewrite asset paths to point to the shared Notes_assets directory
-        old_asset_dir = f"{md_path.stem}_assets"
-        body = body.replace(f"{old_asset_dir}/", f"{asset_dir_name}/")
-
-        lines.append(f"## {lecture_title}")
-        lines.append("")
-        if body:
-            lines.append(body)
+            content = md_path.read_text(encoding="utf-8")
+            content_lines = content.split("\n")
+            body_lines = []
+            skipped_title = False
+            for line in content_lines:
+                if not skipped_title and line.startswith("# ") and not line.startswith("## "):
+                    skipped_title = True
+                    continue
+                body_lines.append(line)
+            body = "\n".join(body_lines).strip()
+            body = demote_headers(body)
+            old_asset_dir = f"{md_path.stem}_assets"
+            body = body.replace(f"{old_asset_dir}/", f"Notes_assets/")
+            lines.append(f"## {title}")
             lines.append("")
-
-    # Embed quizzes using Obsidian's [[]] syntax
-    if quiz_mds:
-        lines.append("---")
-        lines.append("")
-        lines.append("## Quizzes")
-        lines.append("")
-        for qmd in quiz_mds:
-            lines.append(f"[[{qmd.name}]]")
-            lines.append("")
-
-    # Embed programming assignments using Obsidian's [[]] syntax
-    if notebook_paths:
-        if not quiz_mds:
-            lines.append("---")
-            lines.append("")
-        lines.append("## Programming Assignments")
-        lines.append("")
-        for nb in notebook_paths:
-            lines.append(f"[[{nb.name}]]")
-            lines.append("")
-
-    # Embed readings
-    if reading_mds:
-        if not quiz_mds and not notebook_paths:
-            lines.append("---")
-            lines.append("")
-        lines.append("## Readings")
-        lines.append("")
-        for rmd in reading_mds:
-            lines.append(f"[[{rmd.name}]]")
-            lines.append("")
+            if body:
+                lines.append(body)
+                lines.append("")
 
     notes_path.write_text("\n".join(lines), encoding="utf-8")
     return notes_path
@@ -1010,7 +1076,7 @@ def scrape_course(
 
         print(f"  processing module: {mod.title}", file=sys.stderr)
 
-        lecture_mds: list[tuple[str, Path]] = []
+        lecture_mds: dict[str, Path] = {}
 
         for idx, (lecture_title, file_path, kind, transcript_path) in enumerate(files, 1):
             lecture_stem = f"lecture_{idx:02d}"
@@ -1018,7 +1084,7 @@ def scrape_course(
 
             if lecture_md.exists():
                 print(f"    already processed: {lecture_stem}", file=sys.stderr)
-                lecture_mds.append((lecture_title, lecture_md))
+                lecture_mds[lecture_title] = lecture_md
                 continue
 
             print(f"    processing ({kind}): {lecture_title}...", file=sys.stderr)
@@ -1052,18 +1118,21 @@ def scrape_course(
                     except Exception as e:
                         print(f"    transcript enrichment failed: {e}", file=sys.stderr)
 
-                lecture_mds.append((lecture_title, lecture_md))
+                lecture_mds[lecture_title] = lecture_md
             except Exception as e:
                 print(f"    FAILED: {lecture_title}: {e}", file=sys.stderr)
                 failures.append(f"Module {mod.order}, {lecture_title} (processing): {e}")
-                lecture_mds.append((lecture_title, lecture_md))
+                lecture_mds[lecture_title] = lecture_md
 
-        # Combine into Notes.md
-        quiz_mds = module_quizzes.get(mod.order, [])
-        nb_paths = module_notebooks.get(mod.order, [])
-        r_paths = module_readings.get(mod.order, [])
-        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir,
-                                          quiz_mds=quiz_mds, notebook_paths=nb_paths, reading_mds=r_paths)
+        # Build dicts keyed by sanitized title for quizzes, notebooks, readings
+        quiz_dict = {_sanitize_filename(p.stem): p for p in module_quizzes.get(mod.order, [])}
+        nb_dict = {_sanitize_filename(p.stem): p for p in module_notebooks.get(mod.order, [])}
+        reading_dict = {_sanitize_filename(p.stem): p for p in module_readings.get(mod.order, [])}
+        notes_path = combine_module_notes(
+            mod.title, lecture_mds, mod_output_dir,
+            quiz_mds=quiz_dict, notebook_paths=nb_dict, reading_mds=reading_dict,
+            ordered_items=mod.items,
+        )
 
         # Move per-lecture asset directories into the shared Notes_assets
         for idx in range(1, len(files) + 1):
@@ -1076,7 +1145,7 @@ def scrape_course(
                 per_lecture_assets.rmdir()
 
         # Clean up per-lecture markdown files
-        for lecture_title, md_path in lecture_mds:
+        for lecture_title, md_path in lecture_mds.items():
             if md_path.exists() and md_path.name != "Notes.md":
                 md_path.unlink()
 
