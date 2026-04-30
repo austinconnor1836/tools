@@ -45,12 +45,20 @@ class ProgrammingAssignment:
 
 
 @dataclass
+class Reading:
+    title: str
+    url: str
+    order: int
+
+
+@dataclass
 class Module:
     title: str
     order: int
     lectures: list[Lecture] = field(default_factory=list)
     quizzes: list[Quiz] = field(default_factory=list)
     assignments: list[ProgrammingAssignment] = field(default_factory=list)
+    readings: list[Reading] = field(default_factory=list)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -282,8 +290,33 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
             full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
             assignments.append(ProgrammingAssignment(title=title, url=full_url, order=len(assignments) + 1))
 
+        # Find reading/supplement links
+        reading_links = page.query_selector_all('a[href*="/supplement/"]')
+        readings = []
+        # Skip generic course-level readings
+        skip_reading_patterns = ["earn academic", "course syllabus", "assessment expectations",
+                                 "ai citation", "course facilitation", "course support",
+                                 "course resources", "coding in python", "calculator notebook",
+                                 "proctoru", "exam tools", "about the final", "create your",
+                                 "log in to", "do not open", "joining the"]
+        for link in reading_links:
+            href = link.get_attribute("href") or ""
+            text = link.inner_text().strip()
+            if not text:
+                text = link.evaluate("el => el.textContent.trim()") or ""
+                text = re.sub(r"^Completed", "", text).strip()
+            if not href or not text or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            title = _clean_lecture_title(text)
+            if any(p in title.lower() for p in skip_reading_patterns):
+                continue
+            full_url = href if href.startswith("http") else f"https://www.coursera.org{href}"
+            readings.append(Reading(title=title, url=full_url, order=len(readings) + 1))
+
         if lectures:
-            modules.append(Module(title=module_title, order=mod_num, lectures=lectures, quizzes=quizzes, assignments=assignments))
+            modules.append(Module(title=module_title, order=mod_num, lectures=lectures,
+                                  quizzes=quizzes, assignments=assignments, readings=readings))
 
     if not modules:
         raise RuntimeError(
@@ -645,12 +678,95 @@ def download_notebook(page: Page, context, assignment: ProgrammingAssignment, ou
         lab_page.close()
 
 
+def scrape_reading(page: Page, reading: Reading, output_dir: Path) -> Path | None:
+    """Navigate to a reading/supplement page and save its content as markdown."""
+    safe_title = _sanitize_filename(reading.title)
+    md_path = output_dir / f"{safe_title}.md"
+
+    if md_path.exists() and md_path.stat().st_size > 0:
+        print(f"    already scraped reading: {safe_title}", file=sys.stderr)
+        return md_path
+
+    print(f"    scraping reading: {reading.title}...", file=sys.stderr)
+
+    url = reading.url if reading.url.startswith("http") else f"https://www.coursera.org{reading.url}"
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(5)
+
+    # Click Resume if needed to navigate to the actual content
+    try:
+        resume_btn = page.query_selector('button:has-text("Resume"), a:has-text("Resume")')
+        if resume_btn and resume_btn.is_visible():
+            resume_btn.click()
+            time.sleep(5)
+    except Exception:
+        pass
+
+    # Take full-page screenshots and use Gemini to extract content
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        viewport_height = page.viewport_size["height"]
+        total_height = page.evaluate("() => document.documentElement.scrollHeight")
+        screenshots = []
+        y = 0
+        idx = 0
+        while y < total_height:
+            page.evaluate(f"window.scrollTo(0, {y})")
+            time.sleep(0.5)
+            ss_path = td_path / f"reading_{idx:02d}.png"
+            page.screenshot(path=str(ss_path), full_page=False)
+            screenshots.append(ss_path)
+            idx += 1
+            y += viewport_height
+
+        from .pipeline import _make_vision_client
+        client, _, model_name = _make_vision_client()
+        print(f"    extracting content with {model_name}...", file=sys.stderr)
+
+        reading_prompt = (
+            "Extract the reading/article content from this Coursera supplement page as clean markdown. "
+            "Include the title as a # heading. Preserve all text, formatting, links, and any embedded content. "
+            "Skip navigation elements, sidebar, and Coursera UI chrome. "
+            "If there are references to downloadable PDFs, note the title of the PDF."
+        )
+
+        if os.environ.get("GEMINI_API_KEY"):
+            from google.genai import types
+            parts = [types.Part.from_bytes(data=ss.read_bytes(), mime_type="image/png") for ss in screenshots]
+            parts.append(types.Part.from_text(text=reading_prompt))
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[types.Content(role="user", parts=parts)],
+                config=types.GenerateContentConfig(max_output_tokens=16384),
+            )
+            reading_md = response.text
+        else:
+            import base64
+            content = []
+            for ss in screenshots:
+                data = base64.standard_b64encode(ss.read_bytes()).decode("utf-8")
+                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}})
+            content.append({"type": "text", "text": reading_prompt})
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=16384,
+                messages=[{"role": "user", "content": content}],
+            )
+            reading_md = response.content[0].text
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(reading_md, encoding="utf-8")
+    print(f"    wrote {md_path.name}", file=sys.stderr)
+    return md_path
+
+
 def combine_module_notes(
     module_title: str,
     lectures: list[tuple[str, Path]],
     output_dir: Path,
     quiz_mds: list[Path] | None = None,
     notebook_paths: list[Path] | None = None,
+    reading_mds: list[Path] | None = None,
 ) -> Path:
     """Merge per-lecture markdown files into a single Notes.md for the module.
 
@@ -722,6 +838,17 @@ def combine_module_notes(
             lines.append(f"[[{nb.name}]]")
             lines.append("")
 
+    # Embed readings
+    if reading_mds:
+        if not quiz_mds and not notebook_paths:
+            lines.append("---")
+            lines.append("")
+        lines.append("## Readings")
+        lines.append("")
+        for rmd in reading_mds:
+            lines.append(f"[[{rmd.name}]]")
+            lines.append("")
+
     notes_path.write_text("\n".join(lines), encoding="utf-8")
     return notes_path
 
@@ -768,6 +895,8 @@ def scrape_course(
                 extras.append(f"{len(mod.quizzes)} quizzes")
             if mod.assignments:
                 extras.append(f"{len(mod.assignments)} assignments")
+            if mod.readings:
+                extras.append(f"{len(mod.readings)} readings")
             extra_str = f", {', '.join(extras)}" if extras else ""
             print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures{extra_str})", file=sys.stderr)
 
@@ -843,6 +972,24 @@ def scrape_course(
                     failures.append(f"Module {mod.order}, notebook {assignment.title}: {e}")
             module_notebooks[mod.order] = nb_paths
 
+        # Scrape readings
+        module_readings: dict[int, list[Path]] = {}
+        for mod in modules:
+            if not mod.readings:
+                continue
+            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+            mod_output_dir = output_dir / mod_dir_name
+            reading_paths = []
+            for reading in mod.readings:
+                try:
+                    rmd = scrape_reading(page, reading, mod_output_dir)
+                    if rmd:
+                        reading_paths.append(rmd)
+                except Exception as e:
+                    print(f"    FAILED reading: {reading.title}: {e}", file=sys.stderr)
+                    failures.append(f"Module {mod.order}, reading {reading.title}: {e}")
+            module_readings[mod.order] = reading_paths
+
         context.close()
         browser.close()
 
@@ -914,7 +1061,9 @@ def scrape_course(
         # Combine into Notes.md
         quiz_mds = module_quizzes.get(mod.order, [])
         nb_paths = module_notebooks.get(mod.order, [])
-        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir, quiz_mds=quiz_mds, notebook_paths=nb_paths)
+        r_paths = module_readings.get(mod.order, [])
+        notes_path = combine_module_notes(mod.title, lecture_mds, mod_output_dir,
+                                          quiz_mds=quiz_mds, notebook_paths=nb_paths, reading_mds=r_paths)
 
         # Move per-lecture asset directories into the shared Notes_assets
         for idx in range(1, len(files) + 1):
