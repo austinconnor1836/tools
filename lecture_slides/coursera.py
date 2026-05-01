@@ -232,7 +232,7 @@ def discover_course(page: Page, course_url: str) -> list[Module]:
         course_title_el = page.query_selector("h2")
         course_title = course_title_el.inner_text().strip().split("\n")[0] if course_title_el else ""
         skip_patterns = ["congratulations", "rate this", "chat with", "next course",
-                         "you increased", "skill score"]
+                         "you increased", "skill score", "based on the skills"]
         for h2 in page.query_selector_all("h2"):
             text = h2.inner_text().strip().split("\n")[0].strip()
             if not text or text == course_title:
@@ -435,12 +435,26 @@ def download_lecture(page: Page, lecture: Lecture, dest_dir: Path,
     pdf_path = dest_dir / f"{lecture.order:02d}_{safe_title}.pdf"
     mp4_path = dest_dir / f"{lecture.order:02d}_{safe_title}.mp4"
     tx_path = transcript_path if transcript_path.exists() and transcript_path.stat().st_size > 0 else None
-    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+
+    # Check if video still needs saving (even if slides are cached)
+    video_needs_saving = False
+    if save_videos_dir:
+        video_save_path = save_videos_dir / f"{lecture.order:02d}_{safe_title}.mp4"
+        video_needs_saving = not (video_save_path.exists() and video_save_path.stat().st_size > 0)
+
+    if pdf_path.exists() and pdf_path.stat().st_size > 0 and not video_needs_saving:
         print(f"    already downloaded: {pdf_path.name}", file=sys.stderr)
         return pdf_path, "pdf", tx_path
-    if mp4_path.exists() and mp4_path.stat().st_size > 0:
+    if mp4_path.exists() and mp4_path.stat().st_size > 0 and not video_needs_saving:
         print(f"    already downloaded: {mp4_path.name}", file=sys.stderr)
         return mp4_path, "video", tx_path
+
+    # If slides are cached but we still need the video, note the cached result
+    cached_result = None
+    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+        cached_result = (pdf_path, "pdf", tx_path)
+    elif mp4_path.exists() and mp4_path.stat().st_size > 0:
+        cached_result = (mp4_path, "video", tx_path)
 
     print(f"    checking downloads: {lecture.title}...", file=sys.stderr)
 
@@ -464,16 +478,20 @@ def download_lecture(page: Page, lecture: Lecture, dest_dir: Path,
         if video_save_path.exists() and video_save_path.stat().st_size > 0:
             print(f"    video already saved: {video_save_path.name}", file=sys.stderr)
         else:
-            # Prefer 720p, fall back to highest available below 1080p
+            # Prefer 720p, fall back to 1080p, then any available
             video_720 = next(
                 (d for d in downloads if d.kind == "mp4" and "720" in d.label),
-                next((d for d in downloads if d.kind == "mp4" and "1080" not in d.label),
+                next((d for d in downloads if d.kind == "mp4" and "1080" in d.label),
                      next((d for d in downloads if d.kind == "mp4"), None)),
             )
             if video_720:
                 print(f"    saving video ({video_720.label})...", file=sys.stderr)
                 save_videos_dir.mkdir(parents=True, exist_ok=True)
                 _download_file(video_720.url, video_save_path, page)
+
+    # If slides were already cached and we only needed the video, return now
+    if cached_result:
+        return cached_result
 
     # Prefer PDF slides over video for processing
     pdf_dl = next((d for d in downloads if d.kind == "pdf"), None)
