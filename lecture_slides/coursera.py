@@ -419,11 +419,13 @@ def get_lecture_downloads(page: Page) -> list[LectureDownload]:
     return downloads
 
 
-def download_lecture(page: Page, lecture: Lecture, dest_dir: Path) -> tuple[Path, str, Path | None]:
+def download_lecture(page: Page, lecture: Lecture, dest_dir: Path,
+                     save_videos_dir: Path | None = None) -> tuple[Path, str, Path | None]:
     """Navigate to a lecture page, check for PDF slides, fall back to video.
 
     Returns (file_path, kind, transcript_path) where kind is 'pdf' or 'video'.
     transcript_path is None if no transcript was available.
+    If save_videos_dir is set, also downloads the 720p video to that directory.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe_title = _sanitize_filename(lecture.title)
@@ -455,7 +457,25 @@ def download_lecture(page: Page, lecture: Lecture, dest_dir: Path) -> tuple[Path
         print(f"    downloading transcript...", file=sys.stderr)
         _download_file(txt_dl.url, transcript_path, page)
 
-    # Prefer PDF slides over video
+    # If --save-videos, download 720p video to the save directory
+    if save_videos_dir:
+        safe_title = _sanitize_filename(lecture.title)
+        video_save_path = save_videos_dir / f"{lecture.order:02d}_{safe_title}.mp4"
+        if video_save_path.exists() and video_save_path.stat().st_size > 0:
+            print(f"    video already saved: {video_save_path.name}", file=sys.stderr)
+        else:
+            # Prefer 720p, fall back to highest available below 1080p
+            video_720 = next(
+                (d for d in downloads if d.kind == "mp4" and "720" in d.label),
+                next((d for d in downloads if d.kind == "mp4" and "1080" not in d.label),
+                     next((d for d in downloads if d.kind == "mp4"), None)),
+            )
+            if video_720:
+                print(f"    saving video ({video_720.label})...", file=sys.stderr)
+                save_videos_dir.mkdir(parents=True, exist_ok=True)
+                _download_file(video_720.url, video_save_path, page)
+
+    # Prefer PDF slides over video for processing
     pdf_dl = next((d for d in downloads if d.kind == "pdf"), None)
     if pdf_dl:
         print(f"    downloading PDF slides: {pdf_dl.label}...", file=sys.stderr)
@@ -926,6 +946,7 @@ def scrape_course(
     headed: bool = False,
     keep_videos: bool = False,
     skip_download: bool = False,
+    save_videos_dir: Path | None = None,
     interval: float = 2.0,
     hash_threshold: int = 20,
     workers: int = 4,
@@ -994,7 +1015,11 @@ def scrape_course(
                     continue
 
                 try:
-                    file_path, kind, transcript = download_lecture(page, lecture, mod_dl_dir)
+                    vid_dir = None
+                    if save_videos_dir:
+                        mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+                        vid_dir = save_videos_dir / mod_dir_name
+                    file_path, kind, transcript = download_lecture(page, lecture, mod_dl_dir, save_videos_dir=vid_dir)
                     mod_files.append((lecture.title, file_path, kind, transcript))
                 except Exception as e:
                     print(f"    FAILED: {lecture.title}: {e}", file=sys.stderr)
