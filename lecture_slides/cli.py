@@ -63,6 +63,8 @@ def course_main(argv: list[str] | None = None):
                     help="Skip download, use existing videos in output dir")
     ap.add_argument("--save-videos", type=Path, default=None,
                     help="Also download 720p lecture videos to this directory")
+    ap.add_argument("--only", type=str, default=None,
+                    help="Only run specific content types (comma-separated: lectures,quizzes,assignments,readings)")
     ap.add_argument("-i", "--interval", type=float, default=2.0,
                     help="Seconds between sampled frames (default 2.0)")
     ap.add_argument("--hash-threshold", type=int, default=20,
@@ -75,6 +77,10 @@ def course_main(argv: list[str] | None = None):
     if args.modules:
         module_filter = [int(x.strip()) for x in args.modules.split(",")]
 
+    only_filter = None
+    if args.only:
+        only_filter = set(x.strip().lower() for x in args.only.split(","))
+
     try:
         scrape_course(
             course_url=args.url,
@@ -84,6 +90,7 @@ def course_main(argv: list[str] | None = None):
             keep_videos=args.keep_videos,
             skip_download=args.skip_download,
             save_videos_dir=args.save_videos,
+            only=only_filter,
             interval=args.interval,
             hash_threshold=args.hash_threshold,
             workers=args.workers,

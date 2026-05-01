@@ -965,6 +965,7 @@ def scrape_course(
     keep_videos: bool = False,
     skip_download: bool = False,
     save_videos_dir: Path | None = None,
+    only: set[str] | None = None,
     interval: float = 2.0,
     hash_threshold: int = 20,
     workers: int = 4,
@@ -1006,6 +1007,11 @@ def scrape_course(
             print(f"    {mod.order}. {mod.title} ({len(mod.lectures)} lectures{extra_str})", file=sys.stderr)
 
         # Download lecture files (PDF slides preferred, video as fallback)
+        run_lectures = not only or "lectures" in only
+        run_quizzes = not only or "quizzes" in only
+        run_assignments = not only or "assignments" in only
+        run_readings = not only or "readings" in only
+
         print("[3/4] downloading lecture materials...", file=sys.stderr)
         dl_dir = output_dir / ".downloads"
         dl_dir.mkdir(exist_ok=True)
@@ -1017,6 +1023,20 @@ def scrape_course(
         for mod in modules:
             mod_dl_dir = dl_dir / f"module_{mod.order:02d}"
             mod_files: list[tuple[str, Path, str, Path | None]] = []
+
+            if not run_lectures:
+                # Still populate module_files from cached files for Notes.md generation
+                for lecture in mod.lectures:
+                    safe_title = _sanitize_filename(lecture.title)
+                    for ext, kind in [(".pdf", "pdf"), (".mp4", "video")]:
+                        expected = mod_dl_dir / f"{lecture.order:02d}_{safe_title}{ext}"
+                        if expected.exists():
+                            tx_path = mod_dl_dir / f"{lecture.order:02d}_{safe_title}.txt"
+                            tx = tx_path if tx_path.exists() and tx_path.stat().st_size > 0 else None
+                            mod_files.append((lecture.title, expected, kind, tx))
+                            break
+                module_files[mod.order] = mod_files
+                continue
 
             for lecture in mod.lectures:
                 if skip_download:
@@ -1047,57 +1067,66 @@ def scrape_course(
 
         # Scrape quizzes while browser is still open
         module_quizzes: dict[int, list[Path]] = {}
-        for mod in modules:
-            if not mod.quizzes:
-                continue
-            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
-            mod_output_dir = output_dir / mod_dir_name
-            quiz_paths = []
-            for quiz in mod.quizzes:
-                try:
-                    qmd = scrape_quiz(page, quiz, mod_output_dir)
-                    if qmd:
-                        quiz_paths.append(qmd)
-                except Exception as e:
-                    print(f"    FAILED quiz: {quiz.title}: {e}", file=sys.stderr)
-                    failures.append(f"Module {mod.order}, quiz {quiz.title}: {e}")
-            module_quizzes[mod.order] = quiz_paths
+        if run_quizzes:
+            for mod in modules:
+                if not mod.quizzes:
+                    continue
+                mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+                mod_output_dir = output_dir / mod_dir_name
+                quiz_paths = []
+                for quiz in mod.quizzes:
+                    # When --only quizzes, force re-scrape by deleting existing
+                    if only:
+                        safe = _sanitize_filename(quiz.title)
+                        existing = mod_output_dir / f"{safe}.md"
+                        if existing.exists():
+                            existing.unlink()
+                    try:
+                        qmd = scrape_quiz(page, quiz, mod_output_dir)
+                        if qmd:
+                            quiz_paths.append(qmd)
+                    except Exception as e:
+                        print(f"    FAILED quiz: {quiz.title}: {e}", file=sys.stderr)
+                        failures.append(f"Module {mod.order}, quiz {quiz.title}: {e}")
+                module_quizzes[mod.order] = quiz_paths
 
         # Download programming assignment notebooks
         module_notebooks: dict[int, list[Path]] = {}
-        for mod in modules:
-            if not mod.assignments:
-                continue
-            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
-            mod_output_dir = output_dir / mod_dir_name
-            nb_paths = []
-            for assignment in mod.assignments:
-                try:
-                    nb = download_notebook(page, context, assignment, mod_output_dir)
-                    if nb:
-                        nb_paths.append(nb)
-                except Exception as e:
-                    print(f"    FAILED notebook: {assignment.title}: {e}", file=sys.stderr)
-                    failures.append(f"Module {mod.order}, notebook {assignment.title}: {e}")
-            module_notebooks[mod.order] = nb_paths
+        if run_assignments:
+            for mod in modules:
+                if not mod.assignments:
+                    continue
+                mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+                mod_output_dir = output_dir / mod_dir_name
+                nb_paths = []
+                for assignment in mod.assignments:
+                    try:
+                        nb = download_notebook(page, context, assignment, mod_output_dir)
+                        if nb:
+                            nb_paths.append(nb)
+                    except Exception as e:
+                        print(f"    FAILED notebook: {assignment.title}: {e}", file=sys.stderr)
+                        failures.append(f"Module {mod.order}, notebook {assignment.title}: {e}")
+                module_notebooks[mod.order] = nb_paths
 
         # Scrape readings
         module_readings: dict[int, list[Path]] = {}
-        for mod in modules:
-            if not mod.readings:
-                continue
-            mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
-            mod_output_dir = output_dir / mod_dir_name
-            reading_paths = []
-            for reading in mod.readings:
-                try:
-                    rmd = scrape_reading(page, reading, mod_output_dir)
-                    if rmd:
-                        reading_paths.append(rmd)
-                except Exception as e:
-                    print(f"    FAILED reading: {reading.title}: {e}", file=sys.stderr)
-                    failures.append(f"Module {mod.order}, reading {reading.title}: {e}")
-            module_readings[mod.order] = reading_paths
+        if run_readings:
+            for mod in modules:
+                if not mod.readings:
+                    continue
+                mod_dir_name = _sanitize_filename(f"Module {mod.order} - {mod.title}")
+                mod_output_dir = output_dir / mod_dir_name
+                reading_paths = []
+                for reading in mod.readings:
+                    try:
+                        rmd = scrape_reading(page, reading, mod_output_dir)
+                        if rmd:
+                            reading_paths.append(rmd)
+                    except Exception as e:
+                        print(f"    FAILED reading: {reading.title}: {e}", file=sys.stderr)
+                        failures.append(f"Module {mod.order}, reading {reading.title}: {e}")
+                module_readings[mod.order] = reading_paths
 
         context.close()
         browser.close()
